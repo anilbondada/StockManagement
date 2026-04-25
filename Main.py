@@ -9,14 +9,16 @@ Endpoints:
 - POST /morning-stars - Morning Star Pattern Analysis
 """
 
+import asyncio
 import json
+import sqlite3
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional, List
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, RedirectResponse
 from kiteconnect import KiteConnect
 import pandas as pd
 
@@ -30,7 +32,155 @@ MARKET_OPEN = "09:15"
 FIB_LEVELS = [0.382, 0.500, 0.618]
 API_DELAY = 0.35  # seconds between API calls
 TOKEN_FILE = "token.json"
+DB_FILE = "alerts.db"
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── WebSocket manager ─────────────────────────────────────────────────────────
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.active.remove(ws)
+
+    async def broadcast(self, message: str):
+        for ws in list(self.active):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                self.active.remove(ws)
+
+manager = ConnectionManager()
+
+
+# ── Database ─────────────────────────────────────────────────────────────────
+
+def _db():
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def init_db():
+    with _db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chartink_alerts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                stocks         TEXT,
+                trigger_prices TEXT,
+                triggered_at   TEXT,
+                scan_name      TEXT,
+                scan_url       TEXT,
+                alert_name     TEXT,
+                raw            TEXT,
+                received_at    TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stocks_fetched_info (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id    INTEGER,
+                symbol      TEXT,
+                candle_date TEXT,
+                candle_time TEXT,
+                open        REAL,
+                high        REAL,
+                low         REAL,
+                close       REAL,
+                volume      INTEGER,
+                fetched_at  TEXT,
+                FOREIGN KEY (alert_id) REFERENCES chartink_alerts(id)
+            )
+        """)
+
+
+def save_alert(data: dict) -> int:
+    with _db() as conn:
+        cur = conn.execute(
+            """INSERT INTO chartink_alerts
+               (stocks, trigger_prices, triggered_at, scan_name, scan_url, alert_name, raw, received_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                data.get("stocks"),
+                data.get("trigger_prices"),
+                data.get("triggered_at"),
+                data.get("scan_name"),
+                data.get("scan_url"),
+                data.get("alert_name"),
+                json.dumps(data),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return cur.lastrowid
+
+
+# ── Stock candle fetching ─────────────────────────────────────────────────────
+
+def get_previous_trading_day() -> str:
+    from datetime import timedelta
+    day = date.today() - timedelta(days=1)
+    while day.weekday() >= 5:  # skip Saturday(5) and Sunday(6)
+        day -= timedelta(days=1)
+    return day.strftime("%Y-%m-%d")
+
+
+def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list):
+    rows = [
+        (
+            alert_id,
+            symbol,
+            date_str,
+            str(c["date"]),
+            c["open"],
+            c["high"],
+            c["low"],
+            c["close"],
+            c["volume"],
+            datetime.now(timezone.utc).isoformat(),
+        )
+        for c in candles
+    ]
+    with _db() as conn:
+        conn.executemany(
+            """INSERT INTO stocks_fetched_info
+               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+
+
+def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
+    try:
+        kite = get_kite()
+    except Exception as e:
+        print(f"[candle fetch] alert_id={alert_id} kite auth failed: {e}")
+        return
+
+    from_dt = f"{date_str} 09:30:00"
+    to_dt   = f"{date_str} 10:30:00"
+    print(f"[candle fetch] alert_id={alert_id} fetching {symbols} for {date_str}")
+
+    for symbol in symbols:
+        try:
+            token   = get_token(kite, symbol)
+            candles = kite.historical_data(token, from_dt, to_dt, "15minute")
+            time.sleep(API_DELAY)
+            if candles:
+                save_stock_candles(alert_id, symbol, date_str, candles)
+                print(f"[candle fetch] alert_id={alert_id} {symbol}: {len(candles)} candles saved")
+            else:
+                print(f"[candle fetch] alert_id={alert_id} {symbol}: no data returned")
+        except Exception as e:
+            print(f"[candle fetch] alert_id={alert_id} {symbol}: ERROR {e}")
+
+
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -42,13 +192,15 @@ async def lifespan(_: FastAPI):
     else:
         _access_token = None
         print(f"No valid token found. Login here:\n{get_login_url()}")
+    init_db()
     yield
 
 
 app = FastAPI(title="Stock Management API", lifespan=lifespan)
 
 # Token cache
-_token_cache: dict = {}
+_token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
+_instruments_cache: dict = {}  # exchange   -> full instruments list
 _access_token: Optional[str] = None
 
 
@@ -119,8 +271,10 @@ def get_token(kite: KiteConnect, symbol: str, exchange: str = EXCHANGE) -> int:
     key = f"{exchange}:{symbol}"
     if key in _token_cache:
         return _token_cache[key]
-    instruments = kite.instruments(exchange)
-    for inst in instruments:
+    # Fetch instruments list once per exchange and reuse across all symbols
+    if exchange not in _instruments_cache:
+        _instruments_cache[exchange] = kite.instruments(exchange)
+    for inst in _instruments_cache[exchange]:
         if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
             _token_cache[key] = inst["instrument_token"]
             return inst["instrument_token"]
@@ -225,6 +379,529 @@ class MorningStarsResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
+
+
+@app.get("/api/stocks-info")
+def api_stocks_info():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT s.id, s.alert_id, s.symbol, s.candle_date, s.candle_time,
+                   s.open, s.high, s.low, s.close, s.volume, s.fetched_at,
+                   a.scan_name, a.triggered_at
+            FROM stocks_fetched_info s
+            JOIN chartink_alerts a ON a.id = s.alert_id
+            ORDER BY s.alert_id DESC, s.symbol, s.candle_time
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/stocks-info", response_class=HTMLResponse)
+def stocks_info_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stocks Fetched Info</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 28px 16px; }
+
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+    h1 { color: #1a1a2e; font-size: 1.4rem; }
+    .meta { font-size: 0.82rem; color: #6b7280; }
+
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input[type=text] { padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 0.88rem; outline: none; }
+    input[type=text]:focus { border-color: #4f46e5; }
+    button { padding: 8px 18px; border: none; border-radius: 8px; font-size: 0.88rem; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #4f46e5; color: #fff; }
+    .btn-primary:hover { background: #4338ca; }
+    .btn-ghost { background: #e5e7eb; color: #374151; }
+    .btn-ghost:hover { background: #d1d5db; }
+
+    .alert-block { background: #fff; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 24px; overflow: hidden; }
+    .alert-header { background: #1e1e2e; color: #cdd6f4; padding: 12px 18px; display: flex; gap: 24px; align-items: center; flex-wrap: wrap; font-size: 0.85rem; }
+    .alert-header strong { font-size: 0.95rem; color: #fff; }
+    .badge { background: #4f46e5; color: #fff; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; }
+
+    .stock-section { border-top: 1px solid #f1f5f9; }
+    .stock-label { background: #f8fafc; padding: 8px 18px; font-size: 0.78rem; font-weight: 700; color: #374151; letter-spacing: 0.05em; text-transform: uppercase; border-bottom: 1px solid #e2e8f0; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    thead th { background: #f1f5f9; color: #6b7280; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 14px; text-align: right; }
+    thead th:first-child { text-align: left; }
+    tbody td { padding: 8px 14px; border-bottom: 1px solid #f1f5f9; text-align: right; color: #111827; }
+    tbody td:first-child { text-align: left; color: #6b7280; font-size: 0.82rem; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: #fafafa; }
+
+    .bull { color: #16a34a; font-weight: 700; }
+    .bear { color: #dc2626; font-weight: 700; }
+    .flat { color: #6b7280; }
+
+    .empty { text-align: center; padding: 60px; color: #9ca3af; font-size: 0.95rem; }
+    .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #e5e7eb; border-top-color: #4f46e5; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Stocks Fetched Info</h1>
+      <div class="meta" id="meta">Loading...</div>
+    </div>
+    <div class="controls">
+      <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
+      <button class="btn-primary" onclick="load()"><span id="spin"></span>Refresh</button>
+    </div>
+  </div>
+
+  <div id="content"><div class="empty"><span class="spinner"></span> Loading data...</div></div>
+
+  <script>
+    let allData = [];
+
+    function fmt(n) { return n != null ? Number(n).toFixed(2) : '—'; }
+    function fmtTime(t) {
+      if (!t) return '—';
+      const m = t.match(/(\\d{2}:\\d{2})/);
+      return m ? m[1] : t;
+    }
+    function fmtVol(v) {
+      if (!v) return '—';
+      return v >= 1e6 ? (v/1e6).toFixed(2)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v;
+    }
+
+    function render() {
+      const q = document.getElementById('filter').value.trim().toUpperCase();
+      const filtered = q ? allData.filter(r => r.symbol.includes(q)) : allData;
+
+      if (!filtered.length) {
+        document.getElementById('content').innerHTML = '<div class="empty">No data found.</div>';
+        return;
+      }
+
+      // Group by alert_id
+      const alerts = {};
+      for (const row of filtered) {
+        if (!alerts[row.alert_id]) alerts[row.alert_id] = { meta: row, stocks: {} };
+        if (!alerts[row.alert_id].stocks[row.symbol]) alerts[row.alert_id].stocks[row.symbol] = [];
+        alerts[row.alert_id].stocks[row.symbol].push(row);
+      }
+
+      let html = '';
+      for (const aid of Object.keys(alerts).sort((a,b) => b-a)) {
+        const { meta, stocks } = alerts[aid];
+        html += `<div class="alert-block">
+          <div class="alert-header">
+            <strong>${meta.scan_name || 'Alert'}</strong>
+            <span class="badge">Alert #${aid}</span>
+            <span>Triggered: ${meta.triggered_at || '—'}</span>
+            <span>Date: ${meta.candle_date}</span>
+          </div>`;
+
+        for (const sym of Object.keys(stocks).sort()) {
+          const candles = stocks[sym];
+          html += `<div class="stock-section">
+            <div class="stock-label">${sym}</div>
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Change</th>
+              </tr></thead>
+              <tbody>`;
+          for (const c of candles) {
+            const chg = c.open ? ((c.close - c.open) / c.open * 100) : 0;
+            const cls = chg > 0 ? 'bull' : chg < 0 ? 'bear' : 'flat';
+            const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '—';
+            html += `<tr>
+              <td>${fmtTime(c.candle_time)}</td>
+              <td>${fmt(c.open)}</td>
+              <td>${fmt(c.high)}</td>
+              <td>${fmt(c.low)}</td>
+              <td class="${cls}">${fmt(c.close)}</td>
+              <td>${fmtVol(c.volume)}</td>
+              <td class="${cls}">${arrow} ${Math.abs(chg).toFixed(2)}%</td>
+            </tr>`;
+          }
+          html += '</tbody></table></div>';
+        }
+        html += '</div>';
+      }
+      document.getElementById('content').innerHTML = html;
+    }
+
+    async function load() {
+      document.getElementById('spin').innerHTML = '<span class="spinner"></span>';
+      try {
+        const res  = await fetch('/api/stocks-info');
+        allData    = await res.json();
+        const total = allData.length;
+        const syms  = [...new Set(allData.map(r => r.symbol))].length;
+        document.getElementById('meta').textContent = `${total} candles · ${syms} symbols · Last refresh: ${new Date().toLocaleTimeString()}`;
+        render();
+      } catch(e) {
+        document.getElementById('content').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+      } finally {
+        document.getElementById('spin').innerHTML = '';
+      }
+    }
+
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>
+"""
+
+
+@app.post("/simulate/send")
+async def simulate_send(payload: dict):
+    # broadcast only — save happens in chartink_ws when clients receive and echo back
+    await manager.broadcast(json.dumps(payload))
+    return {"sent": True}
+
+
+@app.get("/simulate", response_class=HTMLResponse)
+def simulate_ui():
+    sample = json.dumps({
+        "stocks": "SBIN,RELIANCE,INFY,TATAMOTORS",
+        "trigger_prices": "3.75,541.8,2.1,0.2",
+        "triggered_at": "2:34 pm",
+        "scan_name": "Short term breakouts",
+        "scan_url": "short-term-breakouts",
+        "alert_name": "Alert for Short term breakouts"
+    }, indent=2)
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChartInk Simulator</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 36px 16px; display: flex; flex-direction: column; align-items: center; }}
+    h1 {{ color: #1a1a2e; font-size: 1.4rem; margin-bottom: 6px; }}
+    p {{ color: #6b7280; font-size: 0.85rem; margin-bottom: 24px; }}
+    .card {{ background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 24px; width: 100%; max-width: 560px; }}
+    label {{ font-size: 0.8rem; font-weight: 600; color: #555; display: block; margin-bottom: 8px; }}
+    textarea {{
+      width: 100%; height: 240px; font-family: monospace; font-size: 0.88rem;
+      padding: 14px; border: 1px solid #ddd; border-radius: 8px;
+      resize: vertical; outline: none; line-height: 1.6;
+      background: #1e1e2e; color: #cdd6f4;
+    }}
+    textarea:focus {{ border-color: #4f46e5; }}
+    .actions {{ display: flex; gap: 10px; margin-top: 14px; }}
+    button {{
+      flex: 1; padding: 11px; border: none; border-radius: 8px;
+      font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: background 0.2s;
+    }}
+    #sendBtn {{ background: #4f46e5; color: #fff; }}
+    #sendBtn:hover {{ background: #4338ca; }}
+    #sendBtn:disabled {{ background: #a5b4fc; cursor: not-allowed; }}
+    #resetBtn {{ background: #f3f4f6; color: #374151; }}
+    #resetBtn:hover {{ background: #e5e7eb; }}
+    .toast {{
+      margin-top: 14px; padding: 10px 16px; border-radius: 8px;
+      font-size: 0.88rem; font-weight: 600; display: none;
+    }}
+    .toast.ok  {{ background: #d1fae5; color: #065f46; display: block; }}
+    .toast.err {{ background: #fee2e2; color: #991b1b; display: block; }}
+  </style>
+</head>
+<body>
+  <h1>ChartInk Simulator</h1>
+  <p>Edit the payload and click Send — all clients on <code>/chartink</code> will receive it instantly.</p>
+  <div class="card">
+    <label>Payload JSON</label>
+    <textarea id="payload">{sample}</textarea>
+    <div class="actions">
+      <button id="sendBtn" onclick="send()">Send to WebSocket</button>
+      <button id="resetBtn" onclick="reset()">Reset</button>
+    </div>
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <script>
+    const SAMPLE = {json.dumps(sample)};
+
+    async function send() {{
+      const btn   = document.getElementById('sendBtn');
+      const toast = document.getElementById('toast');
+      const raw   = document.getElementById('payload').value;
+      toast.className = 'toast';
+
+      let parsed;
+      try {{ parsed = JSON.parse(raw); }}
+      catch (e) {{
+        toast.textContent = 'Invalid JSON: ' + e.message;
+        toast.className = 'toast err';
+        return;
+      }}
+
+      if (!ws || ws.readyState !== WebSocket.OPEN) {{
+        toast.textContent = 'WebSocket not connected. Retrying...';
+        toast.className = 'toast err';
+        connectWs();
+        return;
+      }}
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      try {{
+        ws.send(JSON.stringify(parsed));
+        toast.textContent = 'Sent via WebSocket at ' + new Date().toLocaleTimeString();
+        toast.className = 'toast ok';
+      }} catch (e) {{
+        toast.textContent = 'Send failed: ' + e.message;
+        toast.className = 'toast err';
+      }} finally {{
+        btn.disabled = false;
+        btn.textContent = 'Send to WebSocket';
+      }}
+    }}
+
+    function reset() {{
+      document.getElementById('payload').value = SAMPLE;
+      document.getElementById('toast').className = 'toast';
+    }}
+
+    let ws;
+    function connectWs() {{
+      ws = new WebSocket(`ws://${{location.host}}/ws/chartink`);
+      ws.onopen  = () => {{ document.getElementById('toast').className = 'toast'; }};
+      ws.onclose = () => setTimeout(connectWs, 2000);
+    }}
+    connectWs();
+  </script>
+</body>
+</html>
+"""
+
+
+@app.websocket("/ws/chartink")
+async def chartink_ws(ws: WebSocket):
+    await manager.connect(ws)
+    try:
+        while True:
+            text = await ws.receive_text()
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            loop     = asyncio.get_running_loop()
+            alert_id = await loop.run_in_executor(None, save_alert, data)
+            await manager.broadcast(json.dumps(data))
+
+            symbols  = [s.strip() for s in data.get("stocks", "").split(",") if s.strip()]
+            prev_day = get_previous_trading_day()
+
+            async def _fetch_candles(aid=alert_id, syms=symbols, day=prev_day, _loop=loop):
+                await _loop.run_in_executor(None, fetch_and_store_candles, aid, syms, day)
+
+            asyncio.create_task(_fetch_candles())
+
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
+
+
+@app.get("/chartink", response_class=HTMLResponse)
+def chartink_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChartInk - Early Stock In Play</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 30px 16px; }
+    h1 { color: #1a1a2e; font-size: 1.4rem; margin-bottom: 6px; }
+    .meta { font-size: 0.82rem; color: #6b7280; margin-bottom: 20px; display: flex; gap: 16px; align-items: center; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #9ca3af; display: inline-block; }
+    .dot.live { background: #22c55e; animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    pre {
+      background: #1e1e2e; color: #cdd6f4; font-size: 0.82rem;
+      padding: 20px; border-radius: 12px; overflow: auto;
+      white-space: pre-wrap; word-break: break-all;
+      max-height: 80vh; line-height: 1.6;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+    }
+  </style>
+</head>
+<body>
+  <h1>ChartInk — Early Stock In Play</h1>
+  <div class="meta">
+    <span><span class="dot" id="dot"></span> <span id="status">Connecting...</span></span>
+    <span id="ts"></span>
+  </div>
+  <pre id="output">Waiting for data...</pre>
+
+  <script>
+    const host = location.host;
+    const ws   = new WebSocket(`ws://${host}/ws/chartink`);
+    const out  = document.getElementById('output');
+    const dot  = document.getElementById('dot');
+    const st   = document.getElementById('status');
+    const ts   = document.getElementById('ts');
+
+    ws.onopen = () => {
+      dot.classList.add('live');
+      st.textContent = 'Connected — updates every 60s';
+    };
+
+    ws.onmessage = e => {
+      try {
+        const data = JSON.parse(e.data);
+        out.textContent = JSON.stringify(data, null, 2);
+      } catch {
+        out.textContent = e.data;
+      }
+      ts.textContent = 'Last update: ' + new Date().toLocaleTimeString();
+    };
+
+    ws.onclose = () => {
+      dot.classList.remove('live');
+      st.textContent = 'Disconnected';
+    };
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/getStockDetails", response_class=HTMLResponse)
+def get_stock_details():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Early Bloom Analysis</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 16px; }
+    h1 { color: #1a1a2e; margin-bottom: 24px; font-size: 1.6rem; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 28px; width: 100%; max-width: 480px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; color: #555; margin-bottom: 4px; margin-top: 16px; }
+    input { width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; outline: none; transition: border 0.2s; }
+    input:focus { border-color: #4f46e5; }
+    button { margin-top: 22px; width: 100%; padding: 12px; background: #4f46e5; color: #fff; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #4338ca; }
+    button:disabled { background: #a5b4fc; cursor: not-allowed; }
+    #result { margin-top: 28px; width: 100%; max-width: 480px; }
+    .error-box { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 10px; padding: 16px; color: #b91c1c; font-size: 0.95rem; }
+    .result-card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); overflow: hidden; }
+    .result-header { background: #4f46e5; color: #fff; padding: 14px 20px; font-size: 1rem; font-weight: 700; display: flex; justify-content: space-between; }
+    .section { padding: 16px 20px; border-bottom: 1px solid #f1f1f1; }
+    .section:last-child { border-bottom: none; }
+    .section-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; color: #9ca3af; margin-bottom: 10px; letter-spacing: 0.05em; }
+    .row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.9rem; }
+    .row span:first-child { color: #6b7280; }
+    .row span:last-child { font-weight: 600; color: #111827; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }
+    .badge-green { background: #d1fae5; color: #065f46; }
+    .badge-red { background: #fee2e2; color: #991b1b; }
+    .badge-gray { background: #f3f4f6; color: #374151; }
+  </style>
+</head>
+<body>
+  <h1>Early Bloom Analysis</h1>
+  <div class="card">
+    <label for="symbol">Stock Symbol</label>
+    <input id="symbol" type="text" placeholder="e.g. RELIANCE" />
+    <label for="date">Date</label>
+    <input id="date" type="date" />
+    <button id="btn" onclick="analyse()">Analyse</button>
+  </div>
+  <div id="result"></div>
+
+  <script>
+    document.getElementById('date').valueAsDate = new Date();
+
+    async function analyse() {
+      const symbol = document.getElementById('symbol').value.trim().toUpperCase();
+      const date   = document.getElementById('date').value;
+      const btn    = document.getElementById('btn');
+      const out    = document.getElementById('result');
+
+      if (!symbol || !date) { alert('Please enter both symbol and date.'); return; }
+
+      btn.disabled = true;
+      btn.textContent = 'Analysing...';
+      out.innerHTML = '';
+
+      try {
+        const res  = await fetch('/early-bloom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, date })
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          out.innerHTML = `<div class="error-box">Error: ${data.error}</div>`;
+          return;
+        }
+
+        const fmt  = v => (v != null ? v : '—');
+        const gain = data.max_gain;
+        const gainBadge = gain == null ? 'badge-gray'
+                        : gain > 0    ? 'badge-green' : 'badge-red';
+
+        out.innerHTML = `
+          <div class="result-card">
+            <div class="result-header">
+              <span>${data.symbol}</span><span>${data.date}</span>
+            </div>
+            <div class="section">
+              <div class="section-title">15-Min Range Candle</div>
+              <div class="row"><span>Open</span><span>${fmt(data.min15_open)}</span></div>
+              <div class="row"><span>High</span><span>${fmt(data.min15_high)}</span></div>
+              <div class="row"><span>Low</span><span>${fmt(data.min15_low)}</span></div>
+              <div class="row"><span>Close</span><span>${fmt(data.min15_close)}</span></div>
+              <div class="row"><span>Entry Trigger</span><span>${fmt(data.entry_trigger)}</span></div>
+            </div>
+            <div class="section">
+              <div class="section-title">Fibonacci Levels</div>
+              <div class="row"><span>38.2% Price</span><span>${fmt(data.Fib_38_2_price)}</span></div>
+              <div class="row"><span>38.2% Hit</span><span>${fmt(data.Fib_38_2_hit_candle)}</span></div>
+              <div class="row"><span>50.0% Price</span><span>${fmt(data.Fib_50_0_price)}</span></div>
+              <div class="row"><span>50.0% Hit</span><span>${fmt(data.Fib_50_0_hit_candle)}</span></div>
+              <div class="row"><span>61.8% Price</span><span>${fmt(data.Fib_61_8_price)}</span></div>
+              <div class="row"><span>61.8% Hit</span><span>${fmt(data.Fib_61_8_hit_candle)}</span></div>
+            </div>
+            <div class="section">
+              <div class="section-title">Trade</div>
+              <div class="row"><span>Entry Candle</span><span>${fmt(data.entry_candle)}</span></div>
+              <div class="row"><span>Entry Price</span><span>${fmt(data.entry_price)}</span></div>
+              <div class="row"><span>Stop Loss</span><span>${fmt(data.stop_loss)}</span></div>
+              <div class="row"><span>SL Hit At</span><span>${fmt(data.sl_hit_candle)}</span></div>
+              <div class="row">
+                <span>Max Gain</span>
+                <span><span class="badge ${gainBadge}">${gain != null ? gain + ' (' + data.max_gain_pct + '%)' : '—'}</span></span>
+              </div>
+            </div>
+          </div>`;
+      } catch (e) {
+        out.innerHTML = `<div class="error-box">Request failed: ${e.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyse';
+      }
+    }
+  </script>
+</body>
+</html>
+"""
 
 
 @app.post("/early-bloom", response_model=EarlyBloomResponse)
