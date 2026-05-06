@@ -1158,6 +1158,20 @@ def stocks_info_ui():
 """
 
 
+@app.post("/webhook/chartink")
+async def chartink_webhook(payload: dict):
+    """ChartInk posts alerts here. Saves to DB, fetches candles, broadcasts to listeners."""
+    loop     = asyncio.get_running_loop()
+    alert_id = await loop.run_in_executor(None, save_alert, payload)
+    await manager.broadcast(json.dumps(payload))
+    symbols  = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
+    prev_day = get_previous_trading_day()
+    async def _fetch(aid=alert_id, syms=symbols, day=prev_day, _loop=loop):
+        await _loop.run_in_executor(None, fetch_and_store_candles, aid, syms, day)
+    asyncio.create_task(_fetch())
+    return {"received": True, "alert_id": alert_id, "stocks": symbols}
+
+
 @app.post("/simulate/send")
 async def simulate_send(payload: dict):
     # broadcast only — save happens in chartink_ws when clients receive and echo back
