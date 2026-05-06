@@ -1230,7 +1230,7 @@ def simulate_ui():
 </head>
 <body>
   <h1>ChartInk Simulator</h1>
-  <p>Edit the payload and click Send — all clients on <code>/chartink</code> will receive it instantly.</p>
+  <p>Edit the payload and click Send — all clients on <code>/earlybloom</code> will receive it instantly.</p>
   <div class="card">
     <label>Payload JSON</label>
     <textarea id="payload">{sample}</textarea>
@@ -1286,7 +1286,7 @@ def simulate_ui():
 
     let ws;
     function connectWs() {{
-      ws = new WebSocket(`ws://${{location.host}}/ws/chartink`);
+      ws = new WebSocket(`ws://${{location.host}}/ws/earlybloom`);
       ws.onopen  = () => {{ document.getElementById('toast').className = 'toast'; }};
       ws.onclose = () => setTimeout(connectWs, 2000);
     }}
@@ -1297,8 +1297,8 @@ def simulate_ui():
 """
 
 
-@app.websocket("/ws/chartink")
-async def chartink_ws(ws: WebSocket):
+@app.websocket("/ws/earlybloom")
+async def earlybloom_ws(ws: WebSocket):
     await manager.connect(ws)
     try:
         while True:
@@ -1325,8 +1325,8 @@ async def chartink_ws(ws: WebSocket):
         manager.disconnect(ws)
 
 
-@app.get("/chartink", response_class=HTMLResponse)
-def chartink_ui():
+@app.get("/earlybloom", response_class=HTMLResponse)
+def earlybloom_ui():
     return """
 <!DOCTYPE html>
 <html lang="en">
@@ -1361,7 +1361,7 @@ def chartink_ui():
 
   <script>
     const host = location.host;
-    const ws   = new WebSocket(`ws://${host}/ws/chartink`);
+    const ws   = new WebSocket(`ws://${host}/ws/earlybloom`);
     const out  = document.getElementById('output');
     const dot  = document.getElementById('dot');
     const st   = document.getElementById('status');
