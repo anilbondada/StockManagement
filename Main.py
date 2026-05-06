@@ -1165,8 +1165,8 @@ async def earlybloom_webhook(payload: dict):
     alert_id = await loop.run_in_executor(None, save_alert, payload)
     await manager.broadcast(json.dumps(payload))
     symbols  = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
-    prev_day = str(date.today())
-    async def _fetch(aid=alert_id, syms=symbols, day=prev_day, _loop=loop):
+    current_day = str(date.today())
+    async def _fetch(aid=alert_id, syms=symbols, day=current_day, _loop=loop):
         await _loop.run_in_executor(None, fetch_and_store_candles, aid, syms, day)
     asyncio.create_task(_fetch())
     return {"received": True, "alert_id": alert_id, "stocks": symbols}
@@ -1314,9 +1314,9 @@ async def earlybloom_ws(ws: WebSocket):
             await manager.broadcast(json.dumps(data))
 
             symbols  = [s.strip() for s in data.get("stocks", "").split(",") if s.strip()]
-            prev_day = str(date.today())
+            current_day = str(date.today())
 
-            async def _fetch_candles(aid=alert_id, syms=symbols, day=prev_day, _loop=loop):
+            async def _fetch_candles(aid=alert_id, syms=symbols, day=current_day, _loop=loop):
                 await _loop.run_in_executor(None, fetch_and_store_candles, aid, syms, day)
 
             asyncio.create_task(_fetch_candles())
