@@ -381,6 +381,258 @@ def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
 
 
+# ── Place Order ───────────────────────────────────────────────────────────────
+
+@app.get("/api/quote/{symbol}")
+def get_quote(symbol: str):
+    kite = get_kite()
+    symbol = symbol.upper()
+    try:
+        quote = kite.ltp(f"NSE:{symbol}")
+        ltp   = quote[f"NSE:{symbol}"]["last_price"]
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Symbol not found: {e}")
+    instruments = kite.instruments("NSE")
+    inst = next((i for i in instruments if i["tradingsymbol"] == symbol and i["instrument_type"] == "EQ"), None)
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"Instrument {symbol} not found on NSE")
+    return {
+        "symbol":   symbol,
+        "name":     inst["name"],
+        "exchange": "NSE",
+        "lot_size": inst["lot_size"],
+        "ltp":      ltp,
+    }
+
+
+class OrderRequest(BaseModel):
+    symbol:           str
+    transaction_type: str
+    quantity:         int
+    product:          str
+    order_type:       str
+    price:            float = 0
+    trigger_price:    float = 0
+    validity:         str = "DAY"
+
+
+@app.post("/api/place-order")
+def place_order(req: OrderRequest):
+    kite = get_kite()
+    try:
+        order_id = kite.place_order(
+            variety          = kite.VARIETY_REGULAR,
+            exchange         = "NSE",
+            tradingsymbol    = req.symbol.upper(),
+            transaction_type = req.transaction_type,
+            quantity         = req.quantity,
+            product          = req.product,
+            order_type       = req.order_type,
+            validity         = req.validity,
+            price            = req.price,
+            trigger_price    = req.trigger_price,
+        )
+        return {"success": True, "order_id": order_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/place-order", response_class=HTMLResponse)
+def place_order_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Place Order</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;padding:32px 16px;display:flex;flex-direction:column;align-items:center}
+    h1{color:#1a1a2e;font-size:1.4rem;margin-bottom:24px}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);padding:24px;width:100%;max-width:520px;margin-bottom:20px}
+    label{display:block;font-size:.8rem;font-weight:700;color:#555;margin-bottom:5px;margin-top:14px;text-transform:uppercase;letter-spacing:.04em}
+    input,select{width:100%;padding:10px 13px;border:1px solid #ddd;border-radius:8px;font-size:.95rem;outline:none;transition:border .2s}
+    input:focus,select:focus{border-color:#4f46e5}
+    .search-row{display:flex;gap:8px}
+    .search-row input{flex:1}
+    button{padding:10px 20px;border:none;border-radius:8px;font-size:.9rem;font-weight:700;cursor:pointer;transition:background .2s}
+    .btn-search{background:#e0e7ff;color:#3730a3}
+    .btn-search:hover{background:#c7d2fe}
+    .btn-buy{background:#16a34a;color:#fff;width:100%;padding:13px;font-size:1rem;margin-top:20px}
+    .btn-buy:hover{background:#15803d}
+    .btn-sell{background:#dc2626;color:#fff;width:100%;padding:13px;font-size:1rem;margin-top:20px}
+    .btn-sell:hover{background:#b91c1c}
+    .stock-info{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 18px;margin-top:16px;display:none}
+    .stock-info .name{font-size:1rem;font-weight:700;color:#1a1a2e}
+    .stock-info .ltp{font-size:1.6rem;font-weight:800;color:#4f46e5;margin-top:4px}
+    .stock-info .meta{font-size:.8rem;color:#6b7280;margin-top:2px}
+    .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .price-fields{display:none;margin-top:0}
+    .result{border-radius:10px;padding:16px;font-size:.9rem;font-weight:600;display:none;margin-top:16px}
+    .result.ok{background:#d1fae5;color:#065f46}
+    .result.err{background:#fee2e2;color:#991b1b}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#4f46e5;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<h1>Place Order</h1>
+<div class="card">
+
+  <!-- Search -->
+  <label>Stock Symbol</label>
+  <div class="search-row">
+    <input id="symbol" type="text" placeholder="e.g. RELIANCE" onkeydown="if(event.key==='Enter') search()"/>
+    <button class="btn-search" onclick="search()">Search</button>
+  </div>
+
+  <!-- Stock info strip -->
+  <div class="stock-info" id="info">
+    <div class="name" id="info-name"></div>
+    <div class="ltp" id="info-ltp"></div>
+    <div class="meta" id="info-meta"></div>
+  </div>
+
+  <!-- Order fields (shown after search) -->
+  <div id="order-form" style="display:none">
+    <div class="row2">
+      <div>
+        <label>Quantity</label>
+        <input id="qty" type="number" min="1" value="1"/>
+      </div>
+      <div>
+        <label>Validity</label>
+        <select id="validity">
+          <option value="DAY">DAY</option>
+          <option value="IOC">IOC</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row2">
+      <div>
+        <label>Product</label>
+        <select id="product">
+          <option value="CNC">CNC — Delivery</option>
+          <option value="MIS">MIS — Intraday</option>
+          <option value="NRML">NRML — Normal</option>
+        </select>
+      </div>
+      <div>
+        <label>Order Type</label>
+        <select id="order_type" onchange="togglePrice()">
+          <option value="MARKET">MARKET</option>
+          <option value="LIMIT">LIMIT</option>
+          <option value="SL">SL (Stop-Loss Limit)</option>
+          <option value="SL-M">SL-M (Stop-Loss Market)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="price-fields" id="price-fields">
+      <div class="row2">
+        <div id="limit-wrap">
+          <label>Limit Price (₹)</label>
+          <input id="price" type="number" step="0.05" min="0" value="0"/>
+        </div>
+        <div id="trigger-wrap" style="display:none">
+          <label>Trigger Price (₹)</label>
+          <input id="trigger_price" type="number" step="0.05" min="0" value="0"/>
+        </div>
+      </div>
+    </div>
+
+    <div class="row2" style="margin-top:12px">
+      <button class="btn-buy"  onclick="placeOrder('BUY')">▲ BUY</button>
+      <button class="btn-sell" onclick="placeOrder('SELL')">▼ SELL</button>
+    </div>
+
+    <div class="result" id="result"></div>
+  </div>
+</div>
+
+<script>
+  let currentLtp = 0;
+
+  async function search() {
+    const sym = document.getElementById('symbol').value.trim().toUpperCase();
+    if (!sym) return;
+    document.getElementById('info').style.display = 'none';
+    document.getElementById('order-form').style.display = 'none';
+    document.getElementById('result').style.display = 'none';
+
+    try {
+      const res  = await fetch(`/api/quote/${sym}`);
+      if (!res.ok) { const e = await res.json(); alert(e.detail); return; }
+      const data = await res.json();
+      currentLtp = data.ltp;
+
+      document.getElementById('info-name').textContent = data.name;
+      document.getElementById('info-ltp').textContent  = `₹${data.ltp.toFixed(2)}`;
+      document.getElementById('info-meta').textContent = `${data.exchange}  ·  Lot size: ${data.lot_size}`;
+      document.getElementById('info').style.display       = 'block';
+      document.getElementById('order-form').style.display = 'block';
+      document.getElementById('price').value = data.ltp.toFixed(2);
+    } catch(e) {
+      alert('Error: ' + e.message);
+    }
+  }
+
+  function togglePrice() {
+    const ot = document.getElementById('order_type').value;
+    const pf = document.getElementById('price-fields');
+    const lw = document.getElementById('limit-wrap');
+    const tw = document.getElementById('trigger-wrap');
+    pf.style.display = (ot === 'MARKET') ? 'none' : 'block';
+    lw.style.display = (ot === 'SL-M')   ? 'none' : 'block';
+    tw.style.display = (ot === 'SL' || ot === 'SL-M') ? 'block' : 'none';
+  }
+
+  async function placeOrder(side) {
+    const sym    = document.getElementById('symbol').value.trim().toUpperCase();
+    const qty    = parseInt(document.getElementById('qty').value);
+    const ot     = document.getElementById('order_type').value;
+    const result = document.getElementById('result');
+
+    if (!qty || qty < 1) { alert('Enter a valid quantity.'); return; }
+
+    const body = {
+      symbol:           sym,
+      transaction_type: side,
+      quantity:         qty,
+      product:          document.getElementById('product').value,
+      order_type:       ot,
+      validity:         document.getElementById('validity').value,
+      price:            ot === 'MARKET' || ot === 'SL-M' ? 0 : parseFloat(document.getElementById('price').value) || 0,
+      trigger_price:    (ot === 'SL' || ot === 'SL-M')  ? parseFloat(document.getElementById('trigger_price').value) || 0 : 0,
+    };
+
+    result.style.display = 'block';
+    result.className     = 'result';
+    result.innerHTML     = '<span class="spinner"></span> Placing order...';
+
+    try {
+      const res  = await fetch('/api/place-order', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const data = await res.json();
+      if (res.ok) {
+        result.className   = 'result ok';
+        result.innerHTML   = `✓ Order placed!  Order ID: ${data.order_id}`;
+      } else {
+        result.className   = 'result err';
+        result.innerHTML   = `✗ ${data.detail}`;
+      }
+    } catch(e) {
+      result.className = 'result err';
+      result.innerHTML = `✗ ${e.message}`;
+    }
+  }
+</script>
+</body>
+</html>
+"""
+
+
 @app.get("/api/stocks-info")
 def api_stocks_info():
     with _db() as conn:
