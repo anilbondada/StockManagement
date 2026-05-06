@@ -11,11 +11,12 @@ import os
 import re
 import sqlite3
 import time
+import boto3
 from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from kiteconnect import KiteConnect
 from get_access_token import API_KEY
@@ -228,8 +229,37 @@ def get_excel_data(table_name: str):
         raise HTTPException(status_code=404, detail=f"Table '{safe}' not found: {e}")
 
 
+def _run_fetch(safe: str, kite, rows: list):
+    for row_id, date_str, symbol in rows:
+        try:
+            trade_date = _parse_date(str(date_str))
+            prev_date  = _prev_trading_day(trade_date)
+            token      = _instrument_token(kite, str(symbol).strip().upper())
+
+            candles       = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+            time.sleep(0.35)
+            prev_day_data = kite.historical_data(token, f"{prev_date} 00:00:00", f"{prev_date} 23:59:59", "day")
+            time.sleep(0.35)
+            curr_day_data = kite.historical_data(token, f"{trade_date} 00:00:00", f"{trade_date} 23:59:59", "day")
+            time.sleep(0.35)
+
+            if candles:
+                c          = candles[0]
+                prev_close = prev_day_data[0]["close"] if prev_day_data else None
+                pct_change = round((c["close"] - prev_close) / prev_close * 100, 2) if prev_close else None
+                day_high   = curr_day_data[0]["high"] if curr_day_data else None
+                day_low    = curr_day_data[0]["low"]  if curr_day_data else None
+                with _db() as conn:
+                    conn.execute(
+                        f'UPDATE "{safe}" SET open=?, high=?, low=?, close=?, volume=?, prev_close=?, pct_change=?, day_high=?, day_low=? WHERE id=?',
+                        (c["open"], c["high"], c["low"], c["close"], c["volume"], prev_close, pct_change, day_high, day_low, row_id)
+                    )
+        except Exception as e:
+            print(f"[fetch] {symbol} ({date_str}): {e}")
+
+
 @router.post("/api/fetch-candles/{table_name}")
-def fetch_candles_for_table(table_name: str, x_kite_token: Optional[str] = Header(default=None)):
+def fetch_candles_for_table(table_name: str, background_tasks: BackgroundTasks, x_kite_token: Optional[str] = Header(default=None)):
     safe = _sanitize(table_name)
     kite = _get_kite(x_kite_token)
     _ensure_candle_cols(safe)
@@ -238,47 +268,38 @@ def fetch_candles_for_table(table_name: str, x_kite_token: Optional[str] = Heade
         rows = conn.execute(f'SELECT id, date, symbol FROM "{safe}" WHERE open IS NULL OR prev_close IS NULL OR day_high IS NULL').fetchall()
 
     if not rows:
-        return {"updated": 0, "skipped": 0, "errors": [], "message": "All rows already have candle data."}
+        return {"started": False, "total": 0, "message": "All rows already have candle data."}
 
-    updated = skipped = 0
-    errors = []
+    background_tasks.add_task(_run_fetch, safe, kite, rows)
+    est_seconds = len(rows) * 3
+    return {"started": True, "total": len(rows), "est_seconds": est_seconds, "message": f"Fetching {len(rows)} rows in background..."}
 
-    for row_id, date_str, symbol in rows:
-        try:
-            trade_date = _parse_date(str(date_str))
-            prev_date  = _prev_trading_day(trade_date)
-            token      = _instrument_token(kite, str(symbol).strip().upper())
 
-            # Current day 9:15–9:30 candle
-            candles = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
-            time.sleep(0.35)
+@router.post("/api/export-s3/{table_name}")
+def export_to_s3(table_name: str):
+    safe       = _sanitize(table_name)
+    bucket     = "backtest-earlybloom"
+    s3_key     = f"{safe}.csv"
 
-            # Previous day close (daily candle)
-            prev_day_data = kite.historical_data(token, f"{prev_date} 00:00:00", f"{prev_date} 23:59:59", "day")
-            time.sleep(0.35)
+    try:
+        with _db() as conn:
+            rows = conn.execute(f'SELECT * FROM "{safe}" ORDER BY id').fetchall()
+            cols = [d[0] for d in conn.execute(f'SELECT * FROM "{safe}" LIMIT 0').description]
 
-            # Current day full session high/low (daily candle)
-            curr_day_data = kite.historical_data(token, f"{trade_date} 00:00:00", f"{trade_date} 23:59:59", "day")
-            time.sleep(0.35)
+        if not rows:
+            raise HTTPException(status_code=404, detail="Table is empty.")
 
-            if candles:
-                c          = candles[0]
-                prev_close = prev_day_data[0]["close"] if prev_day_data else None
-                pct_change = round((c["close"] - prev_close) / prev_close * 100, 2) if prev_close else None
-                day_high   = curr_day_data[0]["high"]  if curr_day_data else None
-                day_low    = curr_day_data[0]["low"]   if curr_day_data else None
-                with _db() as conn:
-                    conn.execute(
-                        f'UPDATE "{safe}" SET open=?, high=?, low=?, close=?, volume=?, prev_close=?, pct_change=?, day_high=?, day_low=? WHERE id=?',
-                        (c["open"], c["high"], c["low"], c["close"], c["volume"], prev_close, pct_change, day_high, day_low, row_id)
-                    )
-                updated += 1
-            else:
-                skipped += 1
-        except Exception as e:
-            errors.append(f"{symbol} ({date_str}): {e}")
+        df  = pd.DataFrame(rows, columns=cols).drop(columns=["id", "uploaded_at"], errors="ignore")
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        csv_bytes = buf.getvalue().encode("utf-8")
 
-    return {"updated": updated, "skipped": skipped, "errors": errors[:20]}
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.put_object(Bucket=bucket, Key=s3_key, Body=csv_bytes, ContentType="text/csv")
+
+        return {"success": True, "bucket": bucket, "key": s3_key, "rows": len(df)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/view-excel/{table_name}", response_class=HTMLResponse)
@@ -303,6 +324,7 @@ def view_excel_table(table_name: str):
     input:focus{{border-color:#4f46e5}}
     button{{padding:8px 18px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer}}
     .btn-fetch{{background:#16a34a;color:#fff}} .btn-fetch:hover{{background:#15803d}} .btn-fetch:disabled{{background:#86efac;cursor:not-allowed}}
+    .btn-s3{{background:#f97316;color:#fff}} .btn-s3:hover{{background:#ea6c0a}} .btn-s3:disabled{{background:#fdba74;cursor:not-allowed}}
     .btn-back{{background:#e0e7ff;color:#3730a3;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:.85rem;font-weight:700}}
     .btn-back:hover{{background:#c7d2fe}}
     .status{{font-size:.82rem;padding:6px 12px;border-radius:6px;display:none}}
@@ -333,6 +355,7 @@ def view_excel_table(table_name: str):
   <div class="toolbar">
     <input type="password" id="token" placeholder="Access token (uses token.json if blank)"/>
     <button class="btn-fetch" id="fetchBtn" onclick="fetchCandles()">Fetch 9:15–9:30 Candles</button>
+    <button class="btn-s3" id="s3Btn" onclick="exportS3()">Export to S3</button>
     <input type="text" id="search" placeholder="Search..." oninput="filter()"/>
     <span class="status" id="status"></span>
   </div>
@@ -403,6 +426,27 @@ def view_excel_table(table_name: str):
         st.className = 'status err'; st.textContent = 'Request failed: ' + e.message;
       }} finally {{
         btn.disabled = false; btn.textContent = 'Fetch 9:15–9:30 Candles';
+      }}
+    }}
+
+    async function exportS3() {{
+      const btn = document.getElementById('s3Btn');
+      const st  = document.getElementById('status');
+      btn.disabled = true; btn.textContent = 'Exporting...';
+      st.className = 'status info'; st.textContent = 'Uploading CSV to S3...'; st.style.display='block';
+      try {{
+        const res  = await fetch('/api/export-s3/{table_name}', {{ method:'POST' }});
+        const data = await res.json();
+        if (!res.ok) {{
+          st.className = 'status err'; st.textContent = 'Error: ' + data.detail;
+        }} else {{
+          st.className = 'status ok';
+          st.textContent = `✓ Uploaded ${{data.rows}} rows → s3://${{data.bucket}}/${{data.key}}`;
+        }}
+      }} catch(e) {{
+        st.className = 'status err'; st.textContent = 'Failed: ' + e.message;
+      }} finally {{
+        btn.disabled = false; btn.textContent = 'Export to S3';
       }}
     }}
 
