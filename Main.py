@@ -443,6 +443,161 @@ def place_order(req: OrderRequest, x_kite_token: Optional[str] = Header(default=
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/orders")
+def api_orders(x_kite_token: Optional[str] = Header(default=None)):
+    kite = get_kite_with_token(x_kite_token)
+    try:
+        return kite.orders()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/orders", response_class=HTMLResponse)
+def orders_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Order Book</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;padding:28px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{color:#1a1a2e;font-size:1.4rem}
+    .meta{font-size:.82rem;color:#6b7280}
+    .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    input[type=password]{padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:.88rem;outline:none;width:280px}
+    input[type=password]:focus{border-color:#4f46e5}
+    button{padding:8px 18px;border:none;border-radius:8px;font-size:.88rem;font-weight:700;cursor:pointer}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-primary:hover{background:#4338ca}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.08);overflow:hidden}
+    table{width:100%;border-collapse:collapse;font-size:.87rem}
+    thead th{background:#1e1e2e;color:#cdd6f4;padding:10px 14px;text-align:left;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+    tbody td{padding:9px 14px;border-bottom:1px solid #f1f5f9;white-space:nowrap}
+    tbody tr:last-child td{border-bottom:none}
+    tbody tr:hover{background:#fafafa}
+    .buy{color:#16a34a;font-weight:700}
+    .sell{color:#dc2626;font-weight:700}
+    .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.75rem;font-weight:700}
+    .badge-complete{background:#d1fae5;color:#065f46}
+    .badge-open{background:#dbeafe;color:#1e40af}
+    .badge-cancelled{background:#fef9c3;color:#854d0e}
+    .badge-rejected{background:#fee2e2;color:#991b1b}
+    .badge-default{background:#f3f4f6;color:#374151}
+    .summary{display:flex;gap:20px;padding:14px 20px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:.85rem;flex-wrap:wrap}
+    .sum-item span{font-weight:700}
+    .empty{text-align:center;padding:60px;color:#9ca3af}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#4f46e5;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Order Book</h1>
+      <div class="meta" id="meta">—</div>
+    </div>
+    <div class="controls">
+      <input type="password" id="token" placeholder="Paste access token (optional)"/>
+      <button class="btn-primary" onclick="load()">
+        <span id="spin"></span>Fetch Orders
+      </button>
+    </div>
+  </div>
+
+  <div id="content"><div class="card"><div class="empty">Click "Fetch Orders" to load today's orders.</div></div></div>
+
+  <script>
+    function badge(status) {
+      const map = {
+        COMPLETE:'badge-complete', OPEN:'badge-open',
+        CANCELLED:'badge-cancelled', REJECTED:'badge-rejected'
+      };
+      const cls = map[status] || 'badge-default';
+      return `<span class="badge ${cls}">${status}</span>`;
+    }
+
+    function fmt(v) { return (v && v !== 0) ? v : '—'; }
+
+    function fmtTime(ts) {
+      if (!ts) return '—';
+      try { return new Date(ts).toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+      catch { return ts; }
+    }
+
+    async function load() {
+      const token = document.getElementById('token').value.trim();
+      const spin  = document.getElementById('spin');
+      spin.innerHTML = '<span class="spinner"></span>';
+      document.getElementById('meta').textContent = 'Loading...';
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['X-Kite-Token'] = token;
+
+      try {
+        const res    = await fetch('/api/orders', { headers });
+        if (!res.ok) { const e = await res.json(); throw new Error(e.detail); }
+        const orders = await res.json();
+
+        if (!orders.length) {
+          document.getElementById('content').innerHTML = '<div class="card"><div class="empty">No orders found for today.</div></div>';
+          document.getElementById('meta').textContent  = '0 orders';
+          return;
+        }
+
+        const counts = { COMPLETE:0, OPEN:0, CANCELLED:0, REJECTED:0 };
+        orders.forEach(o => { if (counts[o.status] !== undefined) counts[o.status]++; });
+
+        let rows = orders.map(o => `
+          <tr>
+            <td>${fmtTime(o.order_timestamp)}</td>
+            <td><strong>${o.tradingsymbol}</strong></td>
+            <td class="${o.transaction_type==='BUY'?'buy':'sell'}">${o.transaction_type}</td>
+            <td>${o.order_type}</td>
+            <td>${o.product}</td>
+            <td>${o.quantity}</td>
+            <td>${fmt(o.price) === '—' ? 'MKT' : '₹'+o.price}</td>
+            <td>${o.average_price ? '₹'+o.average_price : '—'}</td>
+            <td>${o.trigger_price ? '₹'+o.trigger_price : '—'}</td>
+            <td>${badge(o.status)}</td>
+            <td style="color:#6b7280;font-size:.8rem">${o.order_id}</td>
+          </tr>`).join('');
+
+        document.getElementById('content').innerHTML = `
+          <div class="card">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Product</th>
+                <th>Qty</th><th>Price</th><th>Avg</th><th>Trigger</th><th>Status</th><th>Order ID</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+            <div class="summary">
+              <div class="sum-item">Total: <span>${orders.length}</span></div>
+              <div class="sum-item" style="color:#065f46">Complete: <span>${counts.COMPLETE}</span></div>
+              <div class="sum-item" style="color:#1e40af">Open: <span>${counts.OPEN}</span></div>
+              <div class="sum-item" style="color:#991b1b">Rejected: <span>${counts.REJECTED}</span></div>
+              <div class="sum-item" style="color:#854d0e">Cancelled: <span>${counts.CANCELLED}</span></div>
+            </div>
+          </div>`;
+
+        document.getElementById('meta').textContent = `${orders.length} orders · Last updated: ${new Date().toLocaleTimeString()}`;
+      } catch(e) {
+        document.getElementById('content').innerHTML = `<div class="card"><div class="empty" style="color:#dc2626">Error: ${e.message}</div></div>`;
+        document.getElementById('meta').textContent  = 'Failed';
+      } finally {
+        spin.innerHTML = '';
+      }
+    }
+  </script>
+</body>
+</html>
+"""
+
+
 @app.get("/place-order", response_class=HTMLResponse)
 def place_order_ui():
     return """
