@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
-from kiteconnect import KiteConnect
+from kiteconnect import KiteConnect, KiteTicker
 import pandas as pd
 
 from get_access_token import get_login_url, get_access_token as fetch_access_token, API_KEY
@@ -56,7 +56,47 @@ class ConnectionManager:
             except Exception:
                 self.active.remove(ws)
 
-manager = ConnectionManager()
+manager        = ConnectionManager()
+order_manager  = ConnectionManager()
+_main_loop     = None
+_ticker        = None
+
+
+# ── KiteTicker (real-time order updates) ──────────────────────────────────────
+
+def start_ticker(access_token: str):
+    global _ticker
+    if _ticker:
+        try:
+            _ticker.close()
+        except Exception:
+            pass
+
+    ticker = KiteTicker(API_KEY, access_token)
+
+    def on_order_update(ws, data):
+        if _main_loop:
+            asyncio.run_coroutine_threadsafe(
+                order_manager.broadcast(json.dumps(data, default=str)),
+                _main_loop,
+            )
+
+    def on_connect(ws, response):
+        print("[ticker] Connected to Zerodha order stream.")
+
+    def on_close(ws, code, reason):
+        print(f"[ticker] Disconnected: {reason}")
+
+    def on_error(ws, code, reason):
+        print(f"[ticker] Error {code}: {reason}")
+
+    ticker.on_order_update  = on_order_update
+    ticker.on_connect       = on_connect
+    ticker.on_close         = on_close
+    ticker.on_error         = on_error
+    ticker.connect(threaded=True)
+    _ticker = ticker
+    return ticker
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -184,16 +224,20 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _access_token
+    global _access_token, _main_loop
+    _main_loop = asyncio.get_running_loop()
     token = load_token()
     if token and validate_token(token):
         _access_token = token
         print("Loaded valid access token from file.")
+        start_ticker(_access_token)
     else:
         _access_token = None
         print(f"No valid token found. Login here:\n{get_login_url()}")
     init_db()
     yield
+    if _ticker:
+        _ticker.close()
 
 
 app = FastAPI(title="Stock Management API", lifespan=lifespan)
@@ -247,6 +291,7 @@ def callback(request_token: str):
     try:
         _access_token = fetch_access_token(request_token)
         save_token(_access_token)
+        start_ticker(_access_token)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
     return {"message": "Login successful", "access_token": _access_token}
@@ -379,6 +424,138 @@ class MorningStarsResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
+
+
+# ── Order update stream ───────────────────────────────────────────────────────
+
+@app.websocket("/ws/order-updates")
+async def order_updates_ws(ws: WebSocket):
+    await order_manager.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        order_manager.disconnect(ws)
+
+
+@app.get("/order-updates", response_class=HTMLResponse)
+def order_updates_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Live Order Updates</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;min-height:100vh;padding:28px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+    h1{font-size:1.3rem;color:#fff}
+    .status{display:flex;align-items:center;gap:8px;font-size:.85rem}
+    .dot{width:10px;height:10px;border-radius:50%;background:#4b5563;flex-shrink:0}
+    .dot.live{background:#22c55e;animation:pulse 1.2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .controls{display:flex;gap:8px}
+    button{padding:7px 16px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer}
+    .btn-clear{background:#374151;color:#9ca3af}
+    .btn-clear:hover{background:#4b5563}
+    .feed{display:flex;flex-direction:column;gap:10px}
+    .card{background:#1e1e2e;border-radius:10px;padding:16px 20px;border-left:4px solid #4b5563;animation:slidein .3s ease}
+    @keyframes slidein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+    .card.COMPLETE{border-left-color:#22c55e}
+    .card.OPEN{border-left-color:#3b82f6}
+    .card.REJECTED{border-left-color:#ef4444}
+    .card.CANCELLED{border-left-color:#eab308}
+    .card-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px}
+    .symbol{font-size:1.1rem;font-weight:800;color:#fff}
+    .side-buy{color:#22c55e;font-weight:700}
+    .side-sell{color:#ef4444;font-weight:700}
+    .badge{padding:3px 12px;border-radius:999px;font-size:.75rem;font-weight:700}
+    .badge.COMPLETE{background:#14532d;color:#86efac}
+    .badge.OPEN{background:#1e3a5f;color:#93c5fd}
+    .badge.REJECTED{background:#450a0a;color:#fca5a5}
+    .badge.CANCELLED{background:#422006;color:#fde68a}
+    .badge.default{background:#374151;color:#9ca3af}
+    .card-body{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px 16px}
+    .field label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
+    .field span{font-size:.88rem;color:#e2e8f0}
+    .time{font-size:.75rem;color:#6b7280;margin-top:8px}
+    .empty{text-align:center;padding:80px;color:#4b5563;font-size:.95rem}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Live Order Updates</h1>
+      <div class="status"><span class="dot" id="dot"></span><span id="st">Connecting...</span></div>
+    </div>
+    <div class="controls">
+      <button class="btn-clear" onclick="clearFeed()">Clear</button>
+    </div>
+  </div>
+
+  <div class="feed" id="feed">
+    <div class="empty" id="empty">Waiting for order updates...</div>
+  </div>
+
+  <script>
+    const ws = new WebSocket(`ws://${location.host}/ws/order-updates`);
+
+    ws.onopen  = () => {
+      document.getElementById('dot').classList.add('live');
+      document.getElementById('st').textContent = 'Connected — listening for order updates';
+    };
+    ws.onclose = () => {
+      document.getElementById('dot').classList.remove('live');
+      document.getElementById('st').textContent = 'Disconnected';
+    };
+
+    ws.onmessage = e => {
+      const d = JSON.parse(e.data);
+      document.getElementById('empty')?.remove();
+
+      const status = (d.status || '').toUpperCase();
+      const side   = (d.transaction_type || '').toUpperCase();
+      const sideClass = side === 'BUY' ? 'side-buy' : 'side-sell';
+      const badgeClass = ['COMPLETE','OPEN','REJECTED','CANCELLED'].includes(status) ? status : 'default';
+
+      const ts = d.order_timestamp
+        ? new Date(d.order_timestamp).toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'})
+        : new Date().toLocaleTimeString();
+
+      const card = document.createElement('div');
+      card.className = `card ${status}`;
+      card.innerHTML = `
+        <div class="card-top">
+          <span class="symbol">${d.tradingsymbol || '—'}
+            <span class="${sideClass}" style="font-size:.85rem;margin-left:8px">${side}</span>
+          </span>
+          <span class="badge ${badgeClass}">${status || '—'}</span>
+        </div>
+        <div class="card-body">
+          <div class="field"><label>Order ID</label><span>${d.order_id || '—'}</span></div>
+          <div class="field"><label>Type</label><span>${d.order_type || '—'}</span></div>
+          <div class="field"><label>Product</label><span>${d.product || '—'}</span></div>
+          <div class="field"><label>Qty</label><span>${d.quantity || '—'}</span></div>
+          <div class="field"><label>Price</label><span>${d.price || 'MKT'}</span></div>
+          <div class="field"><label>Avg Price</label><span>${d.average_price || '—'}</span></div>
+          <div class="field"><label>Filled</label><span>${d.filled_quantity ?? '—'}</span></div>
+          <div class="field"><label>Exchange</label><span>${d.exchange || '—'}</span></div>
+        </div>
+        <div class="time">Received at ${ts}</div>`;
+
+      document.getElementById('feed').prepend(card);
+    };
+
+    function clearFeed() {
+      document.getElementById('feed').innerHTML =
+        '<div class="empty" id="empty">Waiting for order updates...</div>';
+    }
+  </script>
+</body>
+</html>
+"""
 
 
 # ── Place Order ───────────────────────────────────────────────────────────────
