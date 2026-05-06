@@ -1158,8 +1158,8 @@ def stocks_info_ui():
 """
 
 
-@app.post("/webhook/chartink")
-async def chartink_webhook(payload: dict):
+@app.post("/webhook/earlybloom")
+async def earlybloom_webhook(payload: dict):
     """ChartInk posts alerts here. Saves to DB, fetches candles, broadcasts to listeners."""
     loop     = asyncio.get_running_loop()
     alert_id = await loop.run_in_executor(None, save_alert, payload)
