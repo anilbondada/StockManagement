@@ -23,6 +23,7 @@ from kiteconnect import KiteConnect, KiteTicker
 import pandas as pd
 
 from get_access_token import get_login_url, get_access_token as fetch_access_token, API_KEY
+from ExcelUpload import router as excel_router
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -241,6 +242,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Stock Management API", lifespan=lifespan)
+app.include_router(excel_router)
 
 # Token cache
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token

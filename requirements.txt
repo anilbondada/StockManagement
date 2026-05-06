@@ -3,3 +3,5 @@ uvicorn
 kiteconnect
 pandas
 requests
+openpyxl
+python-multipart
