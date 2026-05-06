@@ -6,17 +6,87 @@ and store it in a dynamically created SQLite table.
 """
 
 import io
+import json
+import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
+from kiteconnect import KiteConnect
+from get_access_token import API_KEY
 
-DB_FILE = "alerts.db"
+DB_FILE    = "alerts.db"
+TOKEN_FILE = "token.json"
 
 router = APIRouter()
+
+# ── Kite helpers ──────────────────────────────────────────────────────────────
+
+_inst_cache: dict = {}
+_instruments_list: list = []
+
+
+def _load_token_from_file() -> Optional[str]:
+    try:
+        with open(TOKEN_FILE) as f:
+            return json.load(f).get("access_token")
+    except Exception:
+        return None
+
+
+def _get_kite(fallback_token: Optional[str] = None) -> KiteConnect:
+    token = _load_token_from_file() or fallback_token
+    if not token:
+        raise HTTPException(status_code=401, detail="No access token. Provide one or login via /login.")
+    kite = KiteConnect(api_key=API_KEY)
+    kite.set_access_token(token)
+    return kite
+
+
+def _instrument_token(kite: KiteConnect, symbol: str) -> int:
+    global _instruments_list
+    key = f"NSE:{symbol}"
+    if key in _inst_cache:
+        return _inst_cache[key]
+    if not _instruments_list:
+        _instruments_list = kite.instruments("NSE")
+    for inst in _instruments_list:
+        if inst["tradingsymbol"] == symbol and inst["instrument_type"] == "EQ":
+            _inst_cache[key] = inst["instrument_token"]
+            return inst["instrument_token"]
+    raise ValueError(f"{symbol} not found on NSE")
+
+
+def _parse_date(date_str: str) -> str:
+    """Convert MM/DD/YY [HH:MM:SS] → YYYY-MM-DD."""
+    part = str(date_str).strip().split()[0]
+    for fmt in ("%m/%d/%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(part, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return part
+
+
+def _ensure_candle_cols(table_name: str):
+    with _db() as conn:
+        existing = {r[1] for r in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()}
+        for col in ["open", "high", "low", "close", "volume", "prev_close", "pct_change", "day_high", "day_low"]:
+            if col not in existing:
+                conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{col}" REAL')
+
+
+def _prev_trading_day(date_str: str) -> str:
+    from datetime import timedelta
+    dt = datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+    while dt.weekday() >= 5:
+        dt -= timedelta(days=1)
+    return dt.strftime("%Y-%m-%d")
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -72,13 +142,19 @@ def create_and_insert(df: pd.DataFrame, table_name: str, file_name: str) -> dict
     quoted_cols  = ", ".join(f'"{c}"' for c in cols)
     insert_sql   = f'INSERT INTO "{table_name}" (uploaded_at, {quoted_cols}) VALUES ({placeholders})'
 
+    def _safe(v):
+        if pd.isna(v) if not isinstance(v, (list, dict)) else False:
+            return None
+        if isinstance(v, pd.Timestamp):
+            return v.strftime("%m/%d/%y %H:%M:%S") if v.time().hour or v.time().minute else v.strftime("%m/%d/%y")
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        return v
+
     now = datetime.now(timezone.utc).isoformat()
     rows = []
     for _, row in df.iterrows():
-        vals = [now] + [
-            None if pd.isna(v) else (int(v) if isinstance(v, float) and v.is_integer() else v)
-            for v in row
-        ]
+        vals = [now] + [_safe(v) for v in row]
         rows.append(vals)
 
     with _db() as conn:
@@ -103,6 +179,13 @@ async def upload_excel(file: UploadFile = File(...)):
     try:
         content    = await file.read()
         df         = pd.read_excel(io.BytesIO(content))
+        # Re-parse string columns that look like MM/DD/YY dates
+        for col in df.columns:
+            if df[col].dtype == object:
+                try:
+                    df[col] = pd.to_datetime(df[col], dayfirst=False, errors="ignore")
+                except Exception:
+                    pass
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read Excel: {e}")
 
@@ -143,6 +226,197 @@ def get_excel_data(table_name: str):
         return {"table": safe, "columns": cols, "rows": [dict(zip(cols, r)) for r in rows]}
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Table '{safe}' not found: {e}")
+
+
+@router.post("/api/fetch-candles/{table_name}")
+def fetch_candles_for_table(table_name: str, x_kite_token: Optional[str] = Header(default=None)):
+    safe = _sanitize(table_name)
+    kite = _get_kite(x_kite_token)
+    _ensure_candle_cols(safe)
+
+    with _db() as conn:
+        rows = conn.execute(f'SELECT id, date, symbol FROM "{safe}" WHERE open IS NULL OR prev_close IS NULL OR day_high IS NULL').fetchall()
+
+    if not rows:
+        return {"updated": 0, "skipped": 0, "errors": [], "message": "All rows already have candle data."}
+
+    updated = skipped = 0
+    errors = []
+
+    for row_id, date_str, symbol in rows:
+        try:
+            trade_date = _parse_date(str(date_str))
+            prev_date  = _prev_trading_day(trade_date)
+            token      = _instrument_token(kite, str(symbol).strip().upper())
+
+            # Current day 9:15–9:30 candle
+            candles = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+            time.sleep(0.35)
+
+            # Previous day close (daily candle)
+            prev_day_data = kite.historical_data(token, f"{prev_date} 00:00:00", f"{prev_date} 23:59:59", "day")
+            time.sleep(0.35)
+
+            # Current day full session high/low (daily candle)
+            curr_day_data = kite.historical_data(token, f"{trade_date} 00:00:00", f"{trade_date} 23:59:59", "day")
+            time.sleep(0.35)
+
+            if candles:
+                c          = candles[0]
+                prev_close = prev_day_data[0]["close"] if prev_day_data else None
+                pct_change = round((c["close"] - prev_close) / prev_close * 100, 2) if prev_close else None
+                day_high   = curr_day_data[0]["high"]  if curr_day_data else None
+                day_low    = curr_day_data[0]["low"]   if curr_day_data else None
+                with _db() as conn:
+                    conn.execute(
+                        f'UPDATE "{safe}" SET open=?, high=?, low=?, close=?, volume=?, prev_close=?, pct_change=?, day_high=?, day_low=? WHERE id=?',
+                        (c["open"], c["high"], c["low"], c["close"], c["volume"], prev_close, pct_change, day_high, day_low, row_id)
+                    )
+                updated += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            errors.append(f"{symbol} ({date_str}): {e}")
+
+    return {"updated": updated, "skipped": skipped, "errors": errors[:20]}
+
+
+@router.get("/view-excel/{table_name}", response_class=HTMLResponse)
+def view_excel_table(table_name: str):
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{table_name}</title>
+
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'Segoe UI',sans-serif;background:#f0f2f5;padding:28px 16px}}
+    .header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px}}
+    h1{{color:#1a1a2e;font-size:1.3rem}}
+    .meta{{font-size:.82rem;color:#6b7280;margin-top:2px}}
+    .toolbar{{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px;background:#fff;padding:12px 16px;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
+    input[type=text],input[type=password]{{padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:.85rem;outline:none}}
+    input[type=text]{{width:200px}} input[type=password]{{width:260px}}
+    input:focus{{border-color:#4f46e5}}
+    button{{padding:8px 18px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer}}
+    .btn-fetch{{background:#16a34a;color:#fff}} .btn-fetch:hover{{background:#15803d}} .btn-fetch:disabled{{background:#86efac;cursor:not-allowed}}
+    .btn-back{{background:#e0e7ff;color:#3730a3;text-decoration:none;padding:8px 16px;border-radius:8px;font-size:.85rem;font-weight:700}}
+    .btn-back:hover{{background:#c7d2fe}}
+    .status{{font-size:.82rem;padding:6px 12px;border-radius:6px;display:none}}
+    .status.ok{{background:#d1fae5;color:#065f46;display:block}}
+    .status.err{{background:#fee2e2;color:#991b1b;display:block}}
+    .status.info{{background:#dbeafe;color:#1e40af;display:block}}
+    .wrap{{overflow-x:auto;background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.08)}}
+    table{{width:100%;border-collapse:collapse;font-size:.85rem}}
+    thead th{{background:#1e1e2e;color:#cdd6f4;padding:10px 14px;text-align:left;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0}}
+    tbody td{{padding:9px 14px;border-bottom:1px solid #f1f5f9;white-space:nowrap}}
+    tbody tr:last-child td{{border-bottom:none}}
+    tbody tr:hover{{background:#fafafa}}
+    .empty{{text-align:center;padding:60px;color:#9ca3af}}
+    .badge{{background:#e0e7ff;color:#3730a3;padding:2px 10px;border-radius:999px;font-size:.75rem;font-weight:700;margin-left:8px}}
+    .spinner{{display:inline-block;width:14px;height:14px;border:2px solid #e5e7eb;border-top-color:#16a34a;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:5px}}
+    @keyframes spin{{to{{transform:rotate(360deg)}}}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>{table_name} <span class="badge" id="count"></span></h1>
+      <div class="meta" id="meta">Loading...</div>
+    </div>
+    <a class="btn-back" href="/upload-excel">← Upload</a>
+  </div>
+
+  <div class="toolbar">
+    <input type="password" id="token" placeholder="Access token (uses token.json if blank)"/>
+    <button class="btn-fetch" id="fetchBtn" onclick="fetchCandles()">Fetch 9:15–9:30 Candles</button>
+    <input type="text" id="search" placeholder="Search..." oninput="filter()"/>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div class="wrap"><table id="tbl"><thead id="thead"></thead><tbody id="tbody"><tr><td class="empty">Loading...</td></tr></tbody></table></div>
+
+  <script>
+    let allRows = [], allCols = [];
+
+    const COL_ORDER = ['date','symbol','prev_close','open','high','low','close','volume','pct_change','day_high','day_low'];
+
+    async function load() {{
+      const res  = await fetch('/api/excel-data/{table_name}');
+      const data = await res.json();
+      allRows = data.rows;
+      const available = new Set(data.columns.filter(c => c !== 'id' && c !== 'uploaded_at'));
+      // Show in preferred order, then any remaining columns
+      const ordered = COL_ORDER.filter(c => available.has(c));
+      const rest     = data.columns.filter(c => !COL_ORDER.includes(c) && c !== 'id' && c !== 'uploaded_at');
+      allCols = [...ordered, ...rest];
+      document.getElementById('thead').innerHTML = '<tr>' + allCols.map(c => `<th>${{c}}</th>`).join('') + '</tr>';
+      document.getElementById('count').textContent = allRows.length + ' rows';
+      document.getElementById('meta').textContent  = 'Table: {table_name} · ' + allCols.length + ' columns';
+      render(allRows);
+    }}
+
+    function render(rows) {{
+      if (!rows.length) {{
+        document.getElementById('tbody').innerHTML = '<tr><td class="empty" colspan="' + allCols.length + '">No data found.</td></tr>';
+        return;
+      }}
+      document.getElementById('tbody').innerHTML = rows.map(r => {{
+        const cells = allCols.map(c => {{
+          if (c === 'pct_change' && r[c] != null) {{
+            const v   = parseFloat(r[c]);
+            const cls = v > 0 ? 'color:#16a34a;font-weight:700' : v < 0 ? 'color:#dc2626;font-weight:700' : '';
+            const arrow = v > 0 ? '▲' : v < 0 ? '▼' : '';
+            return `<td style="${{cls}}">${{arrow}} ${{v.toFixed(2)}}%</td>`;
+          }}
+          return `<td>${{r[c] ?? ''}}</td>`;
+        }});
+        return '<tr>' + cells.join('') + '</tr>';
+      }}).join('');
+    }}
+
+    async function fetchCandles() {{
+      const btn    = document.getElementById('fetchBtn');
+      const st     = document.getElementById('status');
+      const token  = document.getElementById('token').value.trim();
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Fetching...';
+      st.className = 'status info'; st.textContent = 'Fetching candles from Kite — this may take a minute...'; st.style.display='block';
+
+      const headers = {{}};
+      if (token) headers['X-Kite-Token'] = token;
+
+      try {{
+        const res  = await fetch('/api/fetch-candles/{table_name}', {{ method:'POST', headers }});
+        const data = await res.json();
+        if (!res.ok) {{
+          st.className = 'status err'; st.textContent = 'Error: ' + data.detail;
+        }} else {{
+          st.className = 'status ok';
+          st.textContent = `✓ Updated ${{data.updated}} rows, skipped ${{data.skipped}}${{data.errors?.length ? ' | Errors: ' + data.errors.slice(0,3).join('; ') : ''}}`;
+          await load();
+        }}
+      }} catch(e) {{
+        st.className = 'status err'; st.textContent = 'Request failed: ' + e.message;
+      }} finally {{
+        btn.disabled = false; btn.textContent = 'Fetch 9:15–9:30 Candles';
+      }}
+    }}
+
+    function filter() {{
+      const q = document.getElementById('search').value.toLowerCase();
+      if (!q) {{ render(allRows); return; }}
+      render(allRows.filter(r => allCols.some(c => String(r[c] ?? '').toLowerCase().includes(q))));
+    }}
+
+    load();
+  </script>
+</body>
+</html>
+"""
 
 
 @router.get("/upload-excel", response_class=HTMLResponse)
@@ -286,7 +560,10 @@ def upload_excel_ui():
       h += `<div class="hist-row">
         <div><div class="hist-name">${d.file_name}</div>
         <div class="hist-meta">Table: ${d.table} &nbsp;·&nbsp; ${d.rows} rows &nbsp;·&nbsp; ${new Date(d.uploaded_at).toLocaleString()}</div></div>
-        <span class="hist-badge">${d.columns.split(',').length} cols</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="hist-badge">${d.columns.split(',').length} cols</span>
+          <a href="/view-excel/${d.table}" style="padding:4px 12px;background:#4f46e5;color:#fff;border-radius:6px;font-size:.75rem;font-weight:700;text-decoration:none">View</a>
+        </div>
       </div>`;
     });
     document.getElementById('history').innerHTML = h;
