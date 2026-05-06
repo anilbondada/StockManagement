@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from typing import Optional, List
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from kiteconnect import KiteConnect
 import pandas as pd
@@ -383,9 +383,15 @@ def read_root():
 
 # ── Place Order ───────────────────────────────────────────────────────────────
 
+def get_kite_with_token(token: Optional[str]) -> KiteConnect:
+    kite = KiteConnect(api_key=API_KEY)
+    kite.set_access_token(token or _access_token)
+    return kite
+
+
 @app.get("/api/quote/{symbol}")
-def get_quote(symbol: str):
-    kite = get_kite()
+def get_quote(symbol: str, x_kite_token: Optional[str] = Header(default=None)):
+    kite = get_kite_with_token(x_kite_token)
     symbol = symbol.upper()
     try:
         quote = kite.ltp(f"NSE:{symbol}")
@@ -417,8 +423,8 @@ class OrderRequest(BaseModel):
 
 
 @app.post("/api/place-order")
-def place_order(req: OrderRequest):
-    kite = get_kite()
+def place_order(req: OrderRequest, x_kite_token: Optional[str] = Header(default=None)):
+    kite = get_kite_with_token(x_kite_token)
     try:
         order_id = kite.place_order(
             variety          = kite.VARIETY_REGULAR,
@@ -479,6 +485,10 @@ def place_order_ui():
 <body>
 <h1>Place Order</h1>
 <div class="card">
+
+  <!-- Token -->
+  <label>Access Token</label>
+  <input id="token" type="password" placeholder="Paste your Kite access token (optional)"/>
 
   <!-- Search -->
   <label>Stock Symbol</label>
@@ -555,6 +565,13 @@ def place_order_ui():
 <script>
   let currentLtp = 0;
 
+  function getHeaders(extra = {}) {
+    const token = document.getElementById('token').value.trim();
+    const h = { 'Content-Type': 'application/json', ...extra };
+    if (token) h['X-Kite-Token'] = token;
+    return h;
+  }
+
   async function search() {
     const sym = document.getElementById('symbol').value.trim().toUpperCase();
     if (!sym) return;
@@ -563,7 +580,7 @@ def place_order_ui():
     document.getElementById('result').style.display = 'none';
 
     try {
-      const res  = await fetch(`/api/quote/${sym}`);
+      const res  = await fetch(`/api/quote/${sym}`, { headers: getHeaders() });
       if (!res.ok) { const e = await res.json(); alert(e.detail); return; }
       const data = await res.json();
       currentLtp = data.ltp;
@@ -613,7 +630,7 @@ def place_order_ui():
     result.innerHTML     = '<span class="spinner"></span> Placing order...';
 
     try {
-      const res  = await fetch('/api/place-order', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const res  = await fetch('/api/place-order', { method:'POST', headers: getHeaders(), body:JSON.stringify(body) });
       const data = await res.json();
       if (res.ok) {
         result.className   = 'result ok';
