@@ -1307,7 +1307,7 @@ def stocks_info_ui():
             <div class="stock-label">${sym}</div>
             <table>
               <thead><tr>
-                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Change</th>
+                <th>Time</th><th>Prev Day Low</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Change</th>
               </tr></thead>
               <tbody>`;
           for (const c of candles) {
@@ -1316,6 +1316,7 @@ def stocks_info_ui():
             const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '—';
             html += `<tr>
               <td>${fmtTime(c.candle_time)}</td>
+              <td>${fmt(c.prev_day_low)}</td>
               <td>${fmt(c.open)}</td>
               <td>${fmt(c.high)}</td>
               <td>${fmt(c.low)}</td>
