@@ -142,8 +142,11 @@ def init_db():
         """)
         # Add prev_day_low to existing table if missing
         existing = {r[1] for r in conn.execute("PRAGMA table_info(stocks_fetched_info)").fetchall()}
-        if "prev_day_low" not in existing:
-            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_low REAL")
+        # Migrate prev_day_low → prev_day_close if needed
+        if "prev_day_low" in existing and "prev_day_close" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info RENAME COLUMN prev_day_low TO prev_day_close")
+        elif "prev_day_close" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_close REAL")
         if "pct_change" not in existing:
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN pct_change REAL")
 
@@ -178,7 +181,7 @@ def get_previous_trading_day() -> str:
     return day.strftime("%Y-%m-%d")
 
 
-def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list, prev_day_low: float = None):
+def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list, prev_day_close: float = None):
     rows = [
         (
             alert_id,
@@ -190,8 +193,8 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
             c["low"],
             c["close"],
             c["volume"],
-            prev_day_low,
-            round((c["high"] - prev_day_low) / prev_day_low * 100, 2) if prev_day_low and c["high"] else None,
+            prev_day_close,
+            round((c["high"] - prev_day_close) / prev_day_close * 100, 2) if prev_day_close and c["high"] else None,
             datetime.now(timezone.utc).isoformat(),
         )
         for c in candles
@@ -199,7 +202,7 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
     with _db() as conn:
         conn.executemany(
             """INSERT INTO stocks_fetched_info
-               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, prev_day_low, pct_change, fetched_at)
+               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, prev_day_close, pct_change, fetched_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
@@ -229,14 +232,14 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
             # Fetch both current day candle and prev day in one call
             both = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{date_str} 23:59:59", "day")
             time.sleep(API_DELAY)
-            prev_day_low = both[0]["low"] if both and len(both) >= 1 else None
+            prev_day_close = both[0]["close"] if both and len(both) >= 1 else None
 
             candles = kite.historical_data(token, from_dt, to_dt, "15minute")
             time.sleep(API_DELAY)
 
             if candles:
-                save_stock_candles(alert_id, symbol, date_str, candles, prev_day_low)
-                print(f"[candle fetch] alert_id={alert_id} {symbol}: {len(candles)} candles saved, prev_day_low={prev_day_low}")
+                save_stock_candles(alert_id, symbol, date_str, candles, prev_day_close)
+                print(f"[candle fetch] alert_id={alert_id} {symbol}: {len(candles)} candles saved, prev_day_close={prev_day_close}")
             else:
                 print(f"[candle fetch] alert_id={alert_id} {symbol}: no data returned")
         except Exception as e:
@@ -1144,7 +1147,7 @@ def api_stocks_info():
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT s.id, s.alert_id, s.symbol, s.candle_date, s.candle_time,
-                   s.open, s.high, s.low, s.close, s.volume, s.prev_day_low, s.fetched_at,
+                   s.open, s.high, s.low, s.close, s.volume, s.prev_day_close, s.fetched_at,
                    a.scan_name, a.triggered_at
             FROM stocks_fetched_info s
             JOIN chartink_alerts a ON a.id = s.alert_id
@@ -1164,7 +1167,7 @@ def stocks_info_refresh():
     with _db() as conn:
         rows = conn.execute("""
             SELECT id, symbol, candle_date, high FROM stocks_fetched_info
-            WHERE prev_day_low IS NULL
+            WHERE prev_day_close IS NULL
         """).fetchall()
 
     if not rows:
@@ -1181,15 +1184,15 @@ def stocks_info_refresh():
             prev_date_str = prev_dt.strftime("%Y-%m-%d")
 
             token        = get_token(kite, symbol)
-            both         = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
+            both           = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
             time.sleep(API_DELAY)
-            prev_day_low = both[0]["low"] if both else None
-            pct_change   = round((candle_high - prev_day_low) / prev_day_low * 100, 2) if prev_day_low and candle_high else None
+            prev_day_close = both[0]["close"] if both else None
+            pct_change     = round((candle_high - prev_day_close) / prev_day_close * 100, 2) if prev_day_close and candle_high else None
 
             with _db() as conn:
                 conn.execute(
-                    "UPDATE stocks_fetched_info SET prev_day_low=?, pct_change=? WHERE id=?",
-                    (prev_day_low, pct_change, row_id)
+                    "UPDATE stocks_fetched_info SET prev_day_close=?, pct_change=? WHERE id=?",
+                    (prev_day_close, pct_change, row_id)
                 )
             updated += 1
         except Exception as e:
@@ -1311,16 +1314,16 @@ def stocks_info_ui():
             <div class="stock-label">${sym}</div>
             <table>
               <thead><tr>
-                <th>Time</th><th>Prev Day Low</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Change</th>
+                <th>Time</th><th>Prev Day Close</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Change</th>
               </tr></thead>
               <tbody>`;
           for (const c of candles) {
-            const chg = (c.prev_day_low && c.high) ? ((c.high - c.prev_day_low) / c.prev_day_low * 100) : null;
+            const chg = (c.prev_day_close && c.high) ? ((c.high - c.prev_day_close) / c.prev_day_close * 100) : null;
             const cls = chg == null ? 'flat' : chg > 0 ? 'bull' : chg < 0 ? 'bear' : 'flat';
             const arrow = chg == null ? '—' : chg > 0 ? '▲' : '▼';
             html += `<tr>
               <td>${fmtTime(c.candle_time)}</td>
-              <td>${fmt(c.prev_day_low)}</td>
+              <td>${fmt(c.prev_day_close)}</td>
               <td>${fmt(c.open)}</td>
               <td>${fmt(c.high)}</td>
               <td>${fmt(c.low)}</td>
