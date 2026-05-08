@@ -125,20 +125,25 @@ def init_db():
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS stocks_fetched_info (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                alert_id    INTEGER,
-                symbol      TEXT,
-                candle_date TEXT,
-                candle_time TEXT,
-                open        REAL,
-                high        REAL,
-                low         REAL,
-                close       REAL,
-                volume      INTEGER,
-                fetched_at  TEXT,
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id     INTEGER,
+                symbol       TEXT,
+                candle_date  TEXT,
+                candle_time  TEXT,
+                open         REAL,
+                high         REAL,
+                low          REAL,
+                close        REAL,
+                volume       INTEGER,
+                prev_day_low REAL,
+                fetched_at   TEXT,
                 FOREIGN KEY (alert_id) REFERENCES chartink_alerts(id)
             )
         """)
+        # Add prev_day_low to existing table if missing
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(stocks_fetched_info)").fetchall()}
+        if "prev_day_low" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_low REAL")
 
 
 def save_alert(data: dict) -> int:
@@ -171,7 +176,7 @@ def get_previous_trading_day() -> str:
     return day.strftime("%Y-%m-%d")
 
 
-def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list):
+def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list, prev_day_low: float = None):
     rows = [
         (
             alert_id,
@@ -183,6 +188,7 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list)
             c["low"],
             c["close"],
             c["volume"],
+            prev_day_low,
             datetime.now(timezone.utc).isoformat(),
         )
         for c in candles
@@ -190,8 +196,8 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list)
     with _db() as conn:
         conn.executemany(
             """INSERT INTO stocks_fetched_info
-               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, prev_day_low, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
 
@@ -207,14 +213,27 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
     to_dt   = f"{date_str} 09:30:00"
     print(f"[candle fetch] alert_id={alert_id} fetching {symbols} for {date_str}")
 
+    from datetime import timedelta
+    prev_date = (date.today() - timedelta(days=1))
+    while prev_date.weekday() >= 5:
+        prev_date -= timedelta(days=1)
+    prev_date_str = prev_date.strftime("%Y-%m-%d")
+
     for symbol in symbols:
         try:
             token   = get_token(kite, symbol)
+
+            # Fetch both current day candle and prev day in one call
+            both = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{date_str} 23:59:59", "day")
+            time.sleep(API_DELAY)
+            prev_day_low = both[0]["low"] if both and len(both) >= 1 else None
+
             candles = kite.historical_data(token, from_dt, to_dt, "15minute")
             time.sleep(API_DELAY)
+
             if candles:
-                save_stock_candles(alert_id, symbol, date_str, candles)
-                print(f"[candle fetch] alert_id={alert_id} {symbol}: {len(candles)} candles saved")
+                save_stock_candles(alert_id, symbol, date_str, candles, prev_day_low)
+                print(f"[candle fetch] alert_id={alert_id} {symbol}: {len(candles)} candles saved, prev_day_low={prev_day_low}")
             else:
                 print(f"[candle fetch] alert_id={alert_id} {symbol}: no data returned")
         except Exception as e:
@@ -1122,13 +1141,57 @@ def api_stocks_info():
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT s.id, s.alert_id, s.symbol, s.candle_date, s.candle_time,
-                   s.open, s.high, s.low, s.close, s.volume, s.fetched_at,
+                   s.open, s.high, s.low, s.close, s.volume, s.prev_day_low, s.fetched_at,
                    a.scan_name, a.triggered_at
             FROM stocks_fetched_info s
             JOIN chartink_alerts a ON a.id = s.alert_id
             ORDER BY s.alert_id DESC, s.symbol, s.candle_time
         """).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.post("/api/stocks-info/refresh")
+def stocks_info_refresh():
+    from datetime import timedelta
+    try:
+        kite = get_kite()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT id, symbol, candle_date FROM stocks_fetched_info
+            WHERE prev_day_low IS NULL
+        """).fetchall()
+
+    if not rows:
+        return {"updated": 0, "message": "No missing data."}
+
+    updated = 0
+    errors  = []
+    for row_id, symbol, candle_date in rows:
+        try:
+            trade_date = candle_date[:10]
+            prev_dt    = date.fromisoformat(trade_date) - timedelta(days=1)
+            while prev_dt.weekday() >= 5:
+                prev_dt -= timedelta(days=1)
+            prev_date_str = prev_dt.strftime("%Y-%m-%d")
+
+            token    = get_token(kite, symbol)
+            both     = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
+            time.sleep(API_DELAY)
+            prev_day_low = both[0]["low"] if both else None
+
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET prev_day_low=? WHERE id=?",
+                    (prev_day_low, row_id)
+                )
+            updated += 1
+        except Exception as e:
+            errors.append(f"{symbol}: {e}")
+
+    return {"updated": updated, "errors": errors[:10]}
 
 
 @app.get("/stocks-info", response_class=HTMLResponse)
@@ -1271,6 +1334,8 @@ def stocks_info_ui():
     async function load() {
       document.getElementById('spin').innerHTML = '<span class="spinner"></span>';
       try {
+        // First fill any missing prev_day_low values
+        await fetch('/api/stocks-info/refresh', { method: 'POST' });
         const res  = await fetch('/api/stocks-info');
         allData    = await res.json();
         const total = allData.length;
