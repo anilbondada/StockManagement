@@ -1156,19 +1156,13 @@ def api_stocks_info():
     return [dict(r) for r in rows]
 
 
-@app.post("/api/stocks-info/refresh")
-def stocks_info_refresh():
+def _do_refresh(kite, force: bool = False):
     from datetime import timedelta
-    try:
-        kite = get_kite()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
-
+    query = "SELECT id, symbol, candle_date, high FROM stocks_fetched_info" + (
+        "" if force else " WHERE prev_day_close IS NULL"
+    )
     with _db() as conn:
-        rows = conn.execute("""
-            SELECT id, symbol, candle_date, high FROM stocks_fetched_info
-            WHERE prev_day_close IS NULL
-        """).fetchall()
+        rows = conn.execute(query).fetchall()
 
     if not rows:
         return {"updated": 0, "message": "No missing data."}
@@ -1181,14 +1175,12 @@ def stocks_info_refresh():
             prev_dt    = date.fromisoformat(trade_date) - timedelta(days=1)
             while prev_dt.weekday() >= 5:
                 prev_dt -= timedelta(days=1)
-            prev_date_str = prev_dt.strftime("%Y-%m-%d")
-
-            token        = get_token(kite, symbol)
+            prev_date_str  = prev_dt.strftime("%Y-%m-%d")
+            token          = get_token(kite, symbol)
             both           = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
             time.sleep(API_DELAY)
             prev_day_close = both[0]["close"] if both else None
             pct_change     = round((candle_high - prev_day_close) / prev_day_close * 100, 2) if prev_day_close and candle_high else None
-
             with _db() as conn:
                 conn.execute(
                     "UPDATE stocks_fetched_info SET prev_day_close=?, pct_change=? WHERE id=?",
@@ -1199,6 +1191,24 @@ def stocks_info_refresh():
             errors.append(f"{symbol}: {e}")
 
     return {"updated": updated, "errors": errors[:10]}
+
+
+@app.post("/api/stocks-info/refresh")
+def stocks_info_refresh():
+    try:
+        kite = get_kite()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    return _do_refresh(kite, force=False)
+
+
+@app.post("/api/stocks-info/force-refresh")
+def stocks_info_force_refresh():
+    try:
+        kite = get_kite()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    return _do_refresh(kite, force=True)
 
 
 @app.get("/stocks-info", response_class=HTMLResponse)
@@ -1260,7 +1270,8 @@ def stocks_info_ui():
     </div>
     <div class="controls">
       <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
-      <button class="btn-primary" onclick="load()"><span id="spin"></span>Refresh</button>
+      <button class="btn-primary" onclick="load(false)"><span id="spin"></span>Refresh</button>
+      <button class="btn-primary" style="background:#dc2626" onclick="load(true)">Force Fetch</button>
     </div>
   </div>
 
@@ -1339,11 +1350,11 @@ def stocks_info_ui():
       document.getElementById('content').innerHTML = html;
     }
 
-    async function load() {
+    async function load(force = false) {
       document.getElementById('spin').innerHTML = '<span class="spinner"></span>';
       try {
-        // First fill any missing prev_day_low values
-        await fetch('/api/stocks-info/refresh', { method: 'POST' });
+        const endpoint = force ? '/api/stocks-info/force-refresh' : '/api/stocks-info/refresh';
+        await fetch(endpoint, { method: 'POST' });
         const res  = await fetch('/api/stocks-info');
         allData    = await res.json();
         const total = allData.length;
@@ -1357,8 +1368,8 @@ def stocks_info_ui():
       }
     }
 
-    load();
-    setInterval(load, 30000);
+    load(false);
+    setInterval(() => load(false), 30000);
   </script>
 </body>
 </html>
