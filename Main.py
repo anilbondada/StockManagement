@@ -245,6 +245,19 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
         except Exception as e:
             print(f"[candle fetch] alert_id={alert_id} {symbol}: ERROR {e}")
 
+    # After all candles saved, place orders for qualifying stocks from this alert
+    try:
+        with _db() as conn:
+            order_rows = conn.execute("""
+                SELECT symbol, high, pct_change FROM stocks_fetched_info
+                WHERE alert_id = ? AND pct_change IS NOT NULL AND high IS NOT NULL
+            """, (alert_id,)).fetchall()
+        if order_rows:
+            result = _run_auto_orders(kite, order_rows)
+            print(f"[auto-order] alert_id={alert_id}: placed={len(result['placed'])} skipped={len(result['skipped'])} errors={len(result['errors'])}")
+    except Exception as e:
+        print(f"[auto-order] alert_id={alert_id}: ERROR {e}")
+
 
 
 
@@ -934,36 +947,20 @@ def orders_ui():
 """
 
 
-@app.post("/api/stocks-info/auto-order")
-def stocks_auto_order(x_kite_token: Optional[str] = Header(default=None)):
-    kite = get_kite_with_token(x_kite_token)
-
-    # Get latest candle per symbol (highest alert_id)
-    with _db() as conn:
-        rows = conn.execute("""
-            SELECT s.symbol, s.high, s.pct_change
-            FROM stocks_fetched_info s
-            INNER JOIN (
-                SELECT symbol, MAX(alert_id) AS max_alert
-                FROM stocks_fetched_info
-                GROUP BY symbol
-            ) latest ON s.symbol = latest.symbol AND s.alert_id = latest.max_alert
-            WHERE s.pct_change IS NOT NULL AND s.high IS NOT NULL
-        """).fetchall()
-
+def _run_auto_orders(kite, rows: list) -> dict:
+    """Place SL BUY MIS orders for rows meeting criteria: pct_change < 8 and LTP <= 800."""
     placed  = []
     skipped = []
     errors  = []
 
     for symbol, candle_high, pct_change in rows:
         try:
-            # Fetch LTP
             quote = kite.ltp(f"NSE:{symbol}")
             ltp   = quote[f"NSE:{symbol}"]["last_price"]
 
             if pct_change >= 8 or ltp > 800:
-                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change,
-                                 "reason": f"pct_change={pct_change}% >= 8" if pct_change >= 8 else f"ltp={ltp} > 800"})
+                reason = f"pct_change={pct_change}% >= 8" if pct_change >= 8 else f"ltp={ltp} > 800"
+                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 continue
 
             trigger_price = round(candle_high, 2)
@@ -981,12 +978,34 @@ def stocks_auto_order(x_kite_token: Optional[str] = Header(default=None)):
                 price            = limit_price,
                 trigger_price    = trigger_price,
             )
-            placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price, "limit": limit_price, "ltp": ltp, "pct_change": pct_change})
+            placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price,
+                            "limit": limit_price, "ltp": ltp, "pct_change": pct_change})
+            print(f"[auto-order] {symbol}: order_id={order_id} trigger={trigger_price} limit={limit_price}")
 
         except Exception as e:
             errors.append({"symbol": symbol, "error": str(e)})
+            print(f"[auto-order] {symbol}: ERROR {e}")
 
     return {"placed": placed, "skipped": skipped, "errors": errors}
+
+
+@app.post("/api/stocks-info/auto-order")
+def stocks_auto_order(x_kite_token: Optional[str] = Header(default=None)):
+    kite = get_kite_with_token(x_kite_token)
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT s.symbol, s.high, s.pct_change
+            FROM stocks_fetched_info s
+            INNER JOIN (
+                SELECT symbol, MAX(alert_id) AS max_alert
+                FROM stocks_fetched_info
+                GROUP BY symbol
+            ) latest ON s.symbol = latest.symbol AND s.alert_id = latest.max_alert
+            WHERE s.pct_change IS NOT NULL AND s.high IS NOT NULL
+        """).fetchall()
+
+    return _run_auto_orders(kite, rows)
 
 
 @app.get("/place-order", response_class=HTMLResponse)
