@@ -144,6 +144,8 @@ def init_db():
         existing = {r[1] for r in conn.execute("PRAGMA table_info(stocks_fetched_info)").fetchall()}
         if "prev_day_low" not in existing:
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_low REAL")
+        if "pct_change" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN pct_change REAL")
 
 
 def save_alert(data: dict) -> int:
@@ -189,6 +191,7 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
             c["close"],
             c["volume"],
             prev_day_low,
+            round((c["high"] - prev_day_low) / prev_day_low * 100, 2) if prev_day_low and c["high"] else None,
             datetime.now(timezone.utc).isoformat(),
         )
         for c in candles
@@ -196,8 +199,8 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
     with _db() as conn:
         conn.executemany(
             """INSERT INTO stocks_fetched_info
-               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, prev_day_low, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (alert_id, symbol, candle_date, candle_time, open, high, low, close, volume, prev_day_low, pct_change, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
 
@@ -1160,7 +1163,7 @@ def stocks_info_refresh():
 
     with _db() as conn:
         rows = conn.execute("""
-            SELECT id, symbol, candle_date FROM stocks_fetched_info
+            SELECT id, symbol, candle_date, high FROM stocks_fetched_info
             WHERE prev_day_low IS NULL
         """).fetchall()
 
@@ -1169,7 +1172,7 @@ def stocks_info_refresh():
 
     updated = 0
     errors  = []
-    for row_id, symbol, candle_date in rows:
+    for row_id, symbol, candle_date, candle_high in rows:
         try:
             trade_date = candle_date[:10]
             prev_dt    = date.fromisoformat(trade_date) - timedelta(days=1)
@@ -1177,15 +1180,16 @@ def stocks_info_refresh():
                 prev_dt -= timedelta(days=1)
             prev_date_str = prev_dt.strftime("%Y-%m-%d")
 
-            token    = get_token(kite, symbol)
-            both     = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
+            token        = get_token(kite, symbol)
+            both         = kite.historical_data(token, f"{prev_date_str} 00:00:00", f"{trade_date} 23:59:59", "day")
             time.sleep(API_DELAY)
             prev_day_low = both[0]["low"] if both else None
+            pct_change   = round((candle_high - prev_day_low) / prev_day_low * 100, 2) if prev_day_low and candle_high else None
 
             with _db() as conn:
                 conn.execute(
-                    "UPDATE stocks_fetched_info SET prev_day_low=? WHERE id=?",
-                    (prev_day_low, row_id)
+                    "UPDATE stocks_fetched_info SET prev_day_low=?, pct_change=? WHERE id=?",
+                    (prev_day_low, pct_change, row_id)
                 )
             updated += 1
         except Exception as e:
