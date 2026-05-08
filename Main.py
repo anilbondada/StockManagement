@@ -428,6 +428,138 @@ def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
 
 
+@app.get("/api/chartink-alerts")
+def api_chartink_alerts():
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, stocks, trigger_prices, triggered_at, scan_name, alert_name, received_at FROM chartink_alerts ORDER BY id DESC"
+        ).fetchall()
+    cols = ["id", "stocks", "trigger_prices", "triggered_at", "scan_name", "alert_name", "received_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+@app.get("/chartink-alerts", response_class=HTMLResponse)
+def chartink_alerts_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChartInk Alerts</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;padding:28px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{color:#1a1a2e;font-size:1.4rem}
+    .meta{font-size:.82rem;color:#6b7280;margin-top:2px}
+    .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    input[type=text]{padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:.85rem;outline:none;width:220px}
+    input[type=text]:focus{border-color:#4f46e5}
+    button{padding:8px 18px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer;background:#4f46e5;color:#fff}
+    button:hover{background:#4338ca}
+    .grid{display:flex;flex-direction:column;gap:12px}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);padding:16px 20px;border-left:4px solid #4f46e5}
+    .card-top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+    .scan-name{font-size:1rem;font-weight:700;color:#1a1a2e}
+    .alert-name{font-size:.8rem;color:#6b7280;margin-top:2px}
+    .time-badge{font-size:.78rem;background:#f1f5f9;color:#374151;padding:3px 10px;border-radius:999px;white-space:nowrap}
+    .stocks-wrap{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .stock-pill{background:#e0e7ff;color:#3730a3;padding:3px 12px;border-radius:999px;font-size:.82rem;font-weight:700}
+    .meta-row{display:flex;gap:20px;flex-wrap:wrap;font-size:.8rem;color:#6b7280}
+    .meta-row span strong{color:#374151}
+    .empty{text-align:center;padding:60px;color:#9ca3af;background:#fff;border-radius:12px}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#4f46e5;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .dot{width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block;animation:pulse 1.2s infinite;margin-right:5px}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>ChartInk Alerts</h1>
+      <div class="meta"><span class="dot"></span><span id="meta">Loading...</span></div>
+    </div>
+    <div class="controls">
+      <input type="text" id="search" placeholder="Search stock or scan..." oninput="filter()"/>
+      <button onclick="load()"><span id="spin"></span>Refresh</button>
+    </div>
+  </div>
+
+  <div class="grid" id="grid"><div class="empty"><span class="spinner"></span> Loading alerts...</div></div>
+
+  <script>
+    let allAlerts = [];
+
+    function fmtTime(ts) {
+      if (!ts) return '—';
+      try { return new Date(ts).toLocaleString('en-IN'); } catch { return ts; }
+    }
+
+    function render(alerts) {
+      const grid = document.getElementById('grid');
+      if (!alerts.length) {
+        grid.innerHTML = '<div class="empty">No alerts found.</div>';
+        return;
+      }
+      grid.innerHTML = alerts.map(a => {
+        const stocks = (a.stocks || '').split(',').map(s => s.trim()).filter(Boolean);
+        const prices = (a.trigger_prices || '').split(',').map(s => s.trim());
+        const pills  = stocks.map((s, i) =>
+          `<span class="stock-pill">${s}${prices[i] ? ' <span style="opacity:.7">₹'+prices[i]+'</span>' : ''}</span>`
+        ).join('');
+        return `
+          <div class="card">
+            <div class="card-top">
+              <div>
+                <div class="scan-name">${a.scan_name || '—'}</div>
+                <div class="alert-name">${a.alert_name || ''}</div>
+              </div>
+              <span class="time-badge">Alert #${a.id} &nbsp;·&nbsp; ${a.triggered_at || '—'}</span>
+            </div>
+            <div class="stocks-wrap">${pills || '<span style="color:#9ca3af;font-size:.85rem">No stocks</span>'}</div>
+            <div class="meta-row">
+              <span><strong>Received:</strong> ${fmtTime(a.received_at)}</span>
+              <span><strong>Stocks:</strong> ${stocks.length}</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function filter() {
+      const q = document.getElementById('search').value.toLowerCase();
+      render(q ? allAlerts.filter(a =>
+        (a.stocks || '').toLowerCase().includes(q) ||
+        (a.scan_name || '').toLowerCase().includes(q) ||
+        (a.alert_name || '').toLowerCase().includes(q)
+      ) : allAlerts);
+    }
+
+    async function load() {
+      document.getElementById('spin').innerHTML = '<span class="spinner"></span>';
+      try {
+        const res    = await fetch('/api/chartink-alerts');
+        allAlerts    = await res.json();
+        const total  = allAlerts.length;
+        const stocks = [...new Set(allAlerts.flatMap(a => (a.stocks||'').split(',').map(s=>s.trim()).filter(Boolean)))];
+        document.getElementById('meta').textContent = `${total} alerts · ${stocks.length} unique stocks · refreshes every 30s`;
+        filter();
+      } catch(e) {
+        document.getElementById('grid').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+      } finally {
+        document.getElementById('spin').innerHTML = '';
+      }
+    }
+
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>
+"""
+
+
 # ── Order update stream ───────────────────────────────────────────────────────
 
 @app.websocket("/ws/order-updates")
