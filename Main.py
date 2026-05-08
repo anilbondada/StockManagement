@@ -1311,9 +1311,9 @@ def stocks_info_ui():
               </tr></thead>
               <tbody>`;
           for (const c of candles) {
-            const chg = c.open ? ((c.close - c.open) / c.open * 100) : 0;
-            const cls = chg > 0 ? 'bull' : chg < 0 ? 'bear' : 'flat';
-            const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '—';
+            const chg = (c.prev_day_low && c.high) ? ((c.high - c.prev_day_low) / c.prev_day_low * 100) : null;
+            const cls = chg == null ? 'flat' : chg > 0 ? 'bull' : chg < 0 ? 'bear' : 'flat';
+            const arrow = chg == null ? '—' : chg > 0 ? '▲' : '▼';
             html += `<tr>
               <td>${fmtTime(c.candle_time)}</td>
               <td>${fmt(c.prev_day_low)}</td>
@@ -1322,7 +1322,7 @@ def stocks_info_ui():
               <td>${fmt(c.low)}</td>
               <td class="${cls}">${fmt(c.close)}</td>
               <td>${fmtVol(c.volume)}</td>
-              <td class="${cls}">${arrow} ${Math.abs(chg).toFixed(2)}%</td>
+              <td class="${cls}">${chg != null ? arrow + ' ' + Math.abs(chg).toFixed(2) + '%' : '—'}</td>
             </tr>`;
           }
           html += '</tbody></table></div>';
