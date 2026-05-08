@@ -963,7 +963,7 @@ def _run_auto_orders(kite, rows: list) -> dict:
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 continue
 
-            trigger_price = round(candle_high, 2)
+            trigger_price = round(candle_high + 1, 2)
             limit_price   = round(candle_high + 1, 2)
 
             order_id = kite.place_order(
