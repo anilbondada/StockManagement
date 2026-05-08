@@ -934,6 +934,61 @@ def orders_ui():
 """
 
 
+@app.post("/api/stocks-info/auto-order")
+def stocks_auto_order(x_kite_token: Optional[str] = Header(default=None)):
+    kite = get_kite_with_token(x_kite_token)
+
+    # Get latest candle per symbol (highest alert_id)
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT s.symbol, s.high, s.pct_change
+            FROM stocks_fetched_info s
+            INNER JOIN (
+                SELECT symbol, MAX(alert_id) AS max_alert
+                FROM stocks_fetched_info
+                GROUP BY symbol
+            ) latest ON s.symbol = latest.symbol AND s.alert_id = latest.max_alert
+            WHERE s.pct_change IS NOT NULL AND s.high IS NOT NULL
+        """).fetchall()
+
+    placed  = []
+    skipped = []
+    errors  = []
+
+    for symbol, candle_high, pct_change in rows:
+        try:
+            # Fetch LTP
+            quote = kite.ltp(f"NSE:{symbol}")
+            ltp   = quote[f"NSE:{symbol}"]["last_price"]
+
+            if pct_change >= 8 or ltp > 800:
+                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change,
+                                 "reason": f"pct_change={pct_change}% >= 8" if pct_change >= 8 else f"ltp={ltp} > 800"})
+                continue
+
+            trigger_price = round(candle_high, 2)
+            limit_price   = round(candle_high + 1, 2)
+
+            order_id = kite.place_order(
+                variety          = kite.VARIETY_REGULAR,
+                exchange         = "NSE",
+                tradingsymbol    = symbol,
+                transaction_type = "BUY",
+                quantity         = 100,
+                product          = "MIS",
+                order_type       = "SL",
+                validity         = "DAY",
+                price            = limit_price,
+                trigger_price    = trigger_price,
+            )
+            placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price, "limit": limit_price, "ltp": ltp, "pct_change": pct_change})
+
+        except Exception as e:
+            errors.append({"symbol": symbol, "error": str(e)})
+
+    return {"placed": placed, "skipped": skipped, "errors": errors}
+
+
 @app.get("/place-order", response_class=HTMLResponse)
 def place_order_ui():
     return """
@@ -1272,6 +1327,7 @@ def stocks_info_ui():
       <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
       <button class="btn-primary" onclick="load(false)"><span id="spin"></span>Refresh</button>
       <button class="btn-primary" style="background:#dc2626" onclick="load(true)">Force Fetch</button>
+      <button class="btn-primary" style="background:#7c3aed" onclick="autoOrder()">Auto Order</button>
     </div>
   </div>
 
@@ -1365,6 +1421,24 @@ def stocks_info_ui():
         document.getElementById('content').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
       } finally {
         document.getElementById('spin').innerHTML = '';
+      }
+    }
+
+    async function autoOrder() {
+      if (!confirm('Place SL BUY orders for all stocks with change < 8% and LTP ≤ ₹800?')) return;
+      try {
+        const res  = await fetch('/api/stocks-info/auto-order', { method: 'POST' });
+        const data = await res.json();
+        let msg = '';
+        if (data.placed?.length)
+          msg += `✓ Orders placed (${data.placed.length}): ` + data.placed.map(o => `${o.symbol} #${o.order_id} T:${o.trigger} L:${o.limit}`).join(', ') + '\\n';
+        if (data.skipped?.length)
+          msg += `⊘ Skipped (${data.skipped.length}): ` + data.skipped.map(o => `${o.symbol} (${o.reason})`).join(', ') + '\\n';
+        if (data.errors?.length)
+          msg += `✗ Errors (${data.errors.length}): ` + data.errors.map(o => `${o.symbol}: ${o.error}`).join(', ');
+        alert(msg || 'No qualifying stocks found.');
+      } catch(e) {
+        alert('Auto order failed: ' + e.message);
       }
     }
 
