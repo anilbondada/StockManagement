@@ -1351,7 +1351,6 @@ def stocks_info_ui():
       <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
       <button class="btn-primary" onclick="load(false)"><span id="spin"></span>Refresh</button>
       <button class="btn-primary" style="background:#dc2626" onclick="load(true)">Force Fetch</button>
-      <button class="btn-primary" style="background:#7c3aed" onclick="autoOrder()">Auto Order</button>
     </div>
   </div>
 
