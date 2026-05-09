@@ -245,16 +245,21 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
         except Exception as e:
             print(f"[candle fetch] alert_id={alert_id} {symbol}: ERROR {e}")
 
-    # After all candles saved, place orders for qualifying stocks from this alert
+    # After all candles saved, place orders only before 10:00 AM IST
     try:
-        with _db() as conn:
-            order_rows = conn.execute("""
-                SELECT symbol, high, pct_change FROM stocks_fetched_info
-                WHERE alert_id = ? AND pct_change IS NOT NULL AND high IS NOT NULL
-            """, (alert_id,)).fetchall()
-        if order_rows:
-            result = _run_auto_orders(kite, order_rows)
-            print(f"[auto-order] alert_id={alert_id}: placed={len(result['placed'])} skipped={len(result['skipped'])} errors={len(result['errors'])}")
+        from datetime import timezone as tz
+        ist_now = datetime.now(tz(timedelta(hours=5, minutes=30)))
+        if ist_now.hour < 10:
+            with _db() as conn:
+                order_rows = conn.execute("""
+                    SELECT symbol, high, pct_change FROM stocks_fetched_info
+                    WHERE alert_id = ? AND pct_change IS NOT NULL AND high IS NOT NULL
+                """, (alert_id,)).fetchall()
+            if order_rows:
+                result = _run_auto_orders(kite, order_rows)
+                print(f"[auto-order] alert_id={alert_id}: placed={len(result['placed'])} skipped={len(result['skipped'])} errors={len(result['errors'])}")
+        else:
+            print(f"[auto-order] alert_id={alert_id}: skipped — current IST time {ist_now.strftime('%H:%M')} >= 10:00")
     except Exception as e:
         print(f"[auto-order] alert_id={alert_id}: ERROR {e}")
 
