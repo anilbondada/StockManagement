@@ -259,20 +259,42 @@ def _fetch_complete_candle(data: dict):
     import threading
     def _run():
         try:
-            kite   = get_kite()
-            symbol = data.get("tradingsymbol")
-            ts     = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
-            trade_date = str(ts)[:10]
-            token  = get_token(kite, symbol)
-            candles = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+            kite             = get_kite()
+            symbol           = data.get("tradingsymbol")
+            transaction_type = (data.get("transaction_type") or "").upper()
+            quantity         = data.get("quantity") or 0
+            ts               = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
+            trade_date       = str(ts)[:10]
+            token            = get_token(kite, symbol)
+            candles          = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+
             if candles:
                 c = candles[0]
                 with _db() as conn:
                     conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
                                  (c["high"], c["low"], data.get("order_id")))
                 print(f"[order-update] {symbol} COMPLETE: candle_high={c['high']} candle_low={c['low']}")
+
+                # Place SELL SL order when BUY is complete
+                if transaction_type == "BUY" and quantity > 0:
+                    trigger_price = round(c["low"] - 1,   2)
+                    limit_price   = round(c["low"] - 1.5, 2)
+                    sell_order_id = kite.place_order(
+                        variety          = kite.VARIETY_REGULAR,
+                        exchange         = data.get("exchange", "NSE"),
+                        tradingsymbol    = symbol,
+                        transaction_type = "SELL",
+                        quantity         = quantity,
+                        product          = data.get("product", "MIS"),
+                        order_type       = "SL",
+                        validity         = "DAY",
+                        price            = limit_price,
+                        trigger_price    = trigger_price,
+                    )
+                    print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+
         except Exception as e:
-            print(f"[order-update] candle fetch error: {e}")
+            print(f"[order-update] candle fetch / sell order error: {e}")
     threading.Thread(target=_run, daemon=True).start()
 
 
