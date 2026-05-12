@@ -87,6 +87,12 @@ def start_ticker(access_token: str):
     ticker = KiteTicker(API_KEY, access_token)
 
     def on_order_update(ws, data):
+        try:
+            upsert_order_update(data)
+            if (data.get("status") or "").upper() == "COMPLETE":
+                _fetch_complete_candle(data)
+        except Exception as e:
+            print(f"[order-update] DB error: {e}")
         if _main_loop:
             asyncio.run_coroutine_threadsafe(
                 order_manager.broadcast(json.dumps(data, default=str)),
@@ -181,6 +187,93 @@ def init_db():
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_close REAL")
         if "pct_change" not in existing:
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN pct_change REAL")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS order_updates (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id           TEXT UNIQUE,
+                exchange_order_id  TEXT,
+                tradingsymbol      TEXT,
+                transaction_type   TEXT,
+                product            TEXT,
+                quantity           INTEGER,
+                price              REAL,
+                trigger_price      REAL,
+                average_price      REAL,
+                exchange           TEXT,
+                order_type         TEXT,
+                is_open            INTEGER DEFAULT 0,
+                is_trigger_pending INTEGER DEFAULT 0,
+                is_complete        INTEGER DEFAULT 0,
+                is_rejected        INTEGER DEFAULT 0,
+                is_cancelled       INTEGER DEFAULT 0,
+                status_message     TEXT,
+                candle_high        REAL,
+                candle_low         REAL,
+                order_timestamp    TEXT,
+                last_updated       TEXT
+            )
+        """)
+
+
+def upsert_order_update(data: dict):
+    order_id = data.get("order_id")
+    status   = (data.get("status") or "").upper().replace(" ", "_")
+    now      = datetime.now(timezone.utc).isoformat()
+    flag     = {"OPEN": "is_open", "TRIGGER_PENDING": "is_trigger_pending",
+                "COMPLETE": "is_complete", "REJECTED": "is_rejected", "CANCELLED": "is_cancelled"}
+    col      = flag.get(status)
+
+    with _db() as conn:
+        existing = conn.execute("SELECT id FROM order_updates WHERE order_id=?", (order_id,)).fetchone()
+        if existing:
+            sets = ["average_price=?", "status_message=?", "last_updated=?"]
+            vals = [data.get("average_price"), data.get("status_message"), now]
+            if col:
+                sets.append(f"{col}=1")
+            conn.execute(f"UPDATE order_updates SET {', '.join(sets)} WHERE order_id=?",
+                         vals + [order_id])
+        else:
+            conn.execute("""
+                INSERT INTO order_updates
+                (order_id, exchange_order_id, tradingsymbol, transaction_type, product,
+                 quantity, price, trigger_price, average_price, exchange, order_type,
+                 is_open, is_trigger_pending, is_complete, is_rejected, is_cancelled,
+                 status_message, order_timestamp, last_updated)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                order_id, data.get("exchange_order_id"), data.get("tradingsymbol"),
+                data.get("transaction_type"), data.get("product"), data.get("quantity"),
+                data.get("price"), data.get("trigger_price"), data.get("average_price"),
+                data.get("exchange"), data.get("order_type"),
+                1 if status == "OPEN" else 0,
+                1 if status == "TRIGGER_PENDING" else 0,
+                1 if status == "COMPLETE" else 0,
+                1 if status == "REJECTED" else 0,
+                1 if status == "CANCELLED" else 0,
+                data.get("status_message"), data.get("order_timestamp"), now,
+            ))
+
+
+def _fetch_complete_candle(data: dict):
+    import threading
+    def _run():
+        try:
+            kite   = get_kite()
+            symbol = data.get("tradingsymbol")
+            ts     = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
+            trade_date = str(ts)[:10]
+            token  = get_token(kite, symbol)
+            candles = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+            if candles:
+                c = candles[0]
+                with _db() as conn:
+                    conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
+                                 (c["high"], c["low"], data.get("order_id")))
+                print(f"[order-update] {symbol} COMPLETE: candle_high={c['high']} candle_low={c['low']}")
+        except Exception as e:
+            print(f"[order-update] candle fetch error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def save_alert(data: dict) -> int:
@@ -503,6 +596,146 @@ class MorningStarsResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
+
+
+@app.get("/api/order-updates-table")
+def api_order_updates_table():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT order_id, exchange_order_id, tradingsymbol, transaction_type,
+                   product, quantity, price, trigger_price, average_price,
+                   exchange, order_type, is_open, is_trigger_pending, is_complete,
+                   is_rejected, is_cancelled, status_message,
+                   candle_high, candle_low, order_timestamp, last_updated
+            FROM order_updates ORDER BY last_updated DESC
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/order-updates-table", response_class=HTMLResponse)
+def order_updates_table_ui():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Order Updates</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;padding:28px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{color:#1a1a2e;font-size:1.4rem}
+    .meta{font-size:.82rem;color:#6b7280;margin-top:2px}
+    .controls{display:flex;gap:10px;align-items:center}
+    input[type=text]{padding:8px 12px;border:1px solid #ddd;border-radius:8px;font-size:.85rem;outline:none;width:200px}
+    input[type=text]:focus{border-color:#4f46e5}
+    button{padding:8px 18px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer;background:#4f46e5;color:#fff}
+    button:hover{background:#4338ca}
+    .wrap{overflow-x:auto;background:#fff;border-radius:12px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+    table{width:100%;border-collapse:collapse;font-size:.85rem}
+    thead th{background:#1e1e2e;color:#cdd6f4;padding:10px 14px;text-align:left;white-space:nowrap;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0}
+    tbody td{padding:9px 14px;border-bottom:1px solid #f1f5f9;white-space:nowrap}
+    tbody tr:last-child td{border-bottom:none}
+    tbody tr:hover{background:#fafafa}
+    .buy{color:#16a34a;font-weight:700} .sell{color:#dc2626;font-weight:700}
+    .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.73rem;font-weight:700;margin:1px}
+    .b-open{background:#dbeafe;color:#1e40af}
+    .b-tp{background:#fef9c3;color:#854d0e}
+    .b-complete{background:#d1fae5;color:#065f46}
+    .b-rejected{background:#fee2e2;color:#991b1b}
+    .b-cancelled{background:#f3f4f6;color:#374151}
+    .empty{text-align:center;padding:60px;color:#9ca3af}
+    .spinner{display:inline-block;width:16px;height:16px;border:2px solid #e5e7eb;border-top-color:#4f46e5;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Order Updates</h1>
+      <div class="meta" id="meta">Loading...</div>
+    </div>
+    <div class="controls">
+      <input type="text" id="search" placeholder="Search symbol..." oninput="filter()"/>
+      <button onclick="load()"><span id="spin"></span>Refresh</button>
+    </div>
+  </div>
+  <div class="wrap" id="wrap"><div class="empty"><span class="spinner"></span> Loading...</div></div>
+
+  <script>
+    let all = [];
+
+    function fmt(v){ return v != null ? Number(v).toFixed(2) : '—'; }
+    function fmtTs(ts){ if(!ts) return '—'; try{ return new Date(ts).toLocaleString('en-IN'); }catch{ return ts; } }
+    function statusBadges(r){
+      let b = '';
+      if(r.is_open)            b += '<span class="badge b-open">OPEN</span>';
+      if(r.is_trigger_pending) b += '<span class="badge b-tp">TRIGGER PENDING</span>';
+      if(r.is_complete)        b += '<span class="badge b-complete">COMPLETE</span>';
+      if(r.is_rejected)        b += '<span class="badge b-rejected">REJECTED</span>';
+      if(r.is_cancelled)       b += '<span class="badge b-cancelled">CANCELLED</span>';
+      return b || '—';
+    }
+
+    function render(rows){
+      if(!rows.length){
+        document.getElementById('wrap').innerHTML='<div class="empty">No order updates found.</div>';
+        return;
+      }
+      let h = `<table><thead><tr>
+        <th>Symbol</th><th>Side</th><th>Qty</th><th>Product</th><th>Order Type</th>
+        <th>Price</th><th>Trigger</th><th>Avg Price</th>
+        <th>Status</th><th>Candle High</th><th>Candle Low</th>
+        <th>Order ID</th><th>Last Updated</th>
+      </tr></thead><tbody>`;
+      h += rows.map(r => `<tr>
+        <td><strong>${r.tradingsymbol||'—'}</strong></td>
+        <td class="${(r.transaction_type||'').toLowerCase()}">${r.transaction_type||'—'}</td>
+        <td>${r.quantity||'—'}</td>
+        <td>${r.product||'—'}</td>
+        <td>${r.order_type||'—'}</td>
+        <td>${fmt(r.price)}</td>
+        <td>${fmt(r.trigger_price)}</td>
+        <td>${r.average_price ? fmt(r.average_price) : '—'}</td>
+        <td>${statusBadges(r)}</td>
+        <td>${r.candle_high ? fmt(r.candle_high) : '—'}</td>
+        <td>${r.candle_low  ? fmt(r.candle_low)  : '—'}</td>
+        <td style="font-size:.75rem;color:#6b7280">${r.order_id||'—'}</td>
+        <td style="font-size:.78rem">${fmtTs(r.last_updated)}</td>
+      </tr>`).join('');
+      h += '</tbody></table>';
+      document.getElementById('wrap').innerHTML = h;
+    }
+
+    function filter(){
+      const q = document.getElementById('search').value.toLowerCase();
+      render(q ? all.filter(r => (r.tradingsymbol||'').toLowerCase().includes(q)) : all);
+    }
+
+    async function load(){
+      document.getElementById('spin').innerHTML='<span class="spinner"></span>';
+      try{
+        const res = await fetch('/api/order-updates-table');
+        all = await res.json();
+        const complete = all.filter(r=>r.is_complete).length;
+        document.getElementById('meta').textContent =
+          `${all.length} orders · ${complete} complete · Last refresh: ${new Date().toLocaleTimeString()}`;
+        filter();
+      }catch(e){
+        document.getElementById('wrap').innerHTML=`<div class="empty">Error: ${e.message}</div>`;
+      }finally{
+        document.getElementById('spin').innerHTML='';
+      }
+    }
+
+    load();
+    setInterval(load, 15000);
+  </script>
+</body>
+</html>
+"""
 
 
 @app.get("/api/chartink-alerts")
