@@ -547,10 +547,11 @@ def login():
 @app.get("/callback")
 def callback(request_token: str):
     """Zerodha redirects here with request_token after login."""
-    global _access_token
+    global _access_token, _paused
     try:
         _access_token = fetch_access_token(request_token)
         save_token(_access_token)
+        _paused = False
         start_ticker(_access_token)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")

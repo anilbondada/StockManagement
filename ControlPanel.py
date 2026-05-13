@@ -77,18 +77,38 @@ def control_status():
     }
 
 
+def _stop_ticker():
+    if _main._ticker:
+        try:
+            _main._ticker.close()
+            print("[control] KiteTicker disconnected")
+        except Exception as e:
+            print(f"[control] KiteTicker close error: {e}")
+
+
+def _start_ticker():
+    token = _main._access_token
+    if token:
+        _main.start_ticker(token)
+        print("[control] KiteTicker reconnected")
+    else:
+        print("[control] No token — KiteTicker not started")
+
+
 @router.post("/api/control/pause")
 def control_pause():
     _main._paused = True
     result = _cancel_pending_webhook_orders()
-    print(f"[control] PAUSED — {result['cancelled']} orders cancelled")
+    _stop_ticker()
+    print(f"[control] PAUSED — {result['cancelled']} orders cancelled, ticker disconnected")
     return {"paused": True, **result}
 
 
 @router.post("/api/control/resume")
 def control_resume():
     _main._paused = False
-    print("[control] RESUMED")
+    _start_ticker()
+    print("[control] RESUMED — ticker reconnected")
     return {"paused": False}
 
 
@@ -96,11 +116,12 @@ def control_resume():
 def control_stop():
     _main._paused = True
     result = _cancel_pending_webhook_orders()
+    _stop_ticker()
     try:
         if os.path.exists(TOKEN_FILE):
             os.remove(TOKEN_FILE)
         _main._access_token = None
-        print("[control] STOPPED — token.json deleted, access token cleared")
+        print("[control] STOPPED — token.json deleted, ticker disconnected")
     except Exception as e:
         result["token_error"] = str(e)
     return {"paused": True, "token_deleted": True, **result}
