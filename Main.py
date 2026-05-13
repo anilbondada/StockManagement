@@ -214,6 +214,7 @@ def init_db():
                 is_complete        INTEGER DEFAULT 0,
                 is_rejected        INTEGER DEFAULT 0,
                 is_cancelled       INTEGER DEFAULT 0,
+                is_webhook_order   INTEGER DEFAULT 0,
                 status_message     TEXT,
                 candle_high        REAL,
                 candle_low         REAL,
@@ -221,6 +222,10 @@ def init_db():
                 last_updated       TEXT
             )
         """)
+        # Add is_webhook_order to existing table if missing
+        ou_cols = {r[1] for r in conn.execute("PRAGMA table_info(order_updates)").fetchall()}
+        if "is_webhook_order" not in ou_cols:
+            conn.execute("ALTER TABLE order_updates ADD COLUMN is_webhook_order INTEGER DEFAULT 0")
 
 
 def upsert_order_update(data: dict):
@@ -306,8 +311,17 @@ def _fetch_complete_candle(data: dict):
                                  (c["high"], c["low"], data.get("order_id")))
                 print(f"[order-update] {symbol}: 5-min candle high={c['high']} low={c['low']}")
 
-                # Place SELL SL order for BUY completions only
-                if transaction_type == "BUY" and quantity > 0:
+                # Place SELL SL only for BUY orders placed via ChartInk webhook
+                with _db() as conn:
+                    row = conn.execute(
+                        "SELECT is_webhook_order FROM order_updates WHERE order_id=?",
+                        (data.get("order_id"),)
+                    ).fetchone()
+                is_webhook = row and row[0] == 1
+
+                if not is_webhook:
+                    print(f"[sell-order] {symbol}: skipped — not a webhook order")
+                elif transaction_type == "BUY" and quantity > 0:
                     trigger_price = round(c["low"] - 1,   2)
                     limit_price   = round(c["low"] - 1.5, 2)
                     sell_order_id = kite.place_order(
@@ -1322,6 +1336,14 @@ def _run_auto_orders(kite, rows: list) -> dict:
             placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price,
                             "limit": limit_price, "ltp": ltp, "pct_change": pct_change})
             print(f"[auto-order] {symbol}: order_id={order_id} trigger={trigger_price} limit={limit_price}")
+            # Mark as webhook-originated so SELL logic applies
+            with _db() as conn:
+                conn.execute(
+                    """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                       VALUES (?,?,?,1,?)
+                       ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                    (str(order_id), symbol, "BUY", datetime.now(timezone.utc).isoformat())
+                )
 
         except Exception as e:
             errors.append({"symbol": symbol, "error": str(e)})
