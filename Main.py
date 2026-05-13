@@ -266,14 +266,25 @@ def _fetch_complete_candle(data: dict):
     import threading
     def _run():
         try:
+            from datetime import timedelta as _td
             kite             = get_kite()
             symbol           = data.get("tradingsymbol")
             transaction_type = (data.get("transaction_type") or "").upper()
             quantity         = data.get("quantity") or 0
             ts               = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
-            trade_date       = str(ts)[:10]
-            token            = get_token(kite, symbol)
-            candles          = kite.historical_data(token, f"{trade_date} 09:15:00", f"{trade_date} 09:30:00", "15minute")
+
+            # Parse execution time and round down to nearest 15-min candle boundary
+            exec_dt     = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S")
+            candle_min  = (exec_dt.minute // 15) * 15
+            candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
+            candle_end   = candle_start + _td(minutes=15)
+            trade_date   = exec_dt.strftime("%Y-%m-%d")
+            from_dt      = candle_start.strftime("%Y-%m-%d %H:%M:%S")
+            to_dt        = candle_end.strftime("%Y-%m-%d %H:%M:%S")
+
+            print(f"[order-update] {symbol} COMPLETE at {exec_dt.strftime('%H:%M:%S')} — fetching candle {candle_start.strftime('%H:%M')}–{candle_end.strftime('%H:%M')}")
+            token   = get_token(kite, symbol)
+            candles = kite.historical_data(token, from_dt, to_dt, "15minute")
 
             if candles:
                 c = candles[0]
