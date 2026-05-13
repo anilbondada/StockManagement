@@ -24,6 +24,7 @@ import pandas as pd
 
 from get_access_token import get_login_url, get_access_token as fetch_access_token, API_KEY
 from ExcelUpload import router as excel_router
+from ControlPanel import router as control_router
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -67,6 +68,7 @@ _ticker        = None
 
 _ticker_shutdown    = False
 _ticker_reconnecting = False
+_paused             = False
 
 
 def _load_token_from_json() -> Optional[str]:
@@ -319,7 +321,9 @@ def _fetch_complete_candle(data: dict):
                     ).fetchone()
                 is_webhook = row and row[0] == 1
 
-                if not is_webhook:
+                if _paused:
+                    print(f"[sell-order] {symbol}: skipped — system is PAUSED")
+                elif not is_webhook:
                     print(f"[sell-order] {symbol}: skipped — not a webhook order")
                 elif transaction_type == "BUY" and quantity > 0:
                     trigger_price = round(c["low"] - 1,   2)
@@ -496,6 +500,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Stock Management API", lifespan=lifespan)
 app.include_router(excel_router)
+app.include_router(control_router)
 
 # Token cache
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
@@ -1835,6 +1840,9 @@ def stocks_info_ui():
 @app.post("/webhook/earlybloom")
 async def earlybloom_webhook(payload: dict):
     """ChartInk posts alerts here. Saves to DB, fetches candles, broadcasts to listeners."""
+    if _paused:
+        print("[webhook] System is PAUSED — alert received but ignored.")
+        return {"received": False, "reason": "System is paused"}
     loop     = asyncio.get_running_loop()
     alert_id = await loop.run_in_executor(None, save_alert, payload)
     await manager.broadcast(json.dumps(payload))
