@@ -363,6 +363,7 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
 
 
 def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
+    global _access_token
     # Try _access_token first, fall back to token.json
     kite = None
     for token in [_access_token, _load_token_from_json()]:
@@ -373,7 +374,6 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
             kite.set_access_token(token)
             kite.profile()   # validate
             if token != _access_token:
-                global _access_token
                 _access_token = token
                 print(f"[candle fetch] alert_id={alert_id} reloaded token from token.json")
             break
