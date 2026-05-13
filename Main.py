@@ -687,6 +687,21 @@ def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
 
 
+@app.get("/manifest.json")
+def web_manifest():
+    return {
+        "name": "HH Trading Control",
+        "short_name": "HH Control",
+        "start_url": "/control",
+        "display": "standalone",
+        "background_color": "#0f0f1a",
+        "theme_color": "#0f0f1a",
+        "icons": [
+            {"src": "https://www.heaven-hunter.com/favicon.ico", "sizes": "any", "type": "image/x-icon"}
+        ]
+    }
+
+
 @app.get("/api/order-updates-table")
 def api_order_updates_table():
     with _db() as conn:
