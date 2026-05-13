@@ -264,36 +264,49 @@ def upsert_order_update(data: dict):
 
 def _fetch_complete_candle(data: dict):
     import threading
+    from datetime import timedelta as _td, timezone as _tz
+
     def _run():
         try:
-            from datetime import timedelta as _td
             kite             = get_kite()
             symbol           = data.get("tradingsymbol")
             transaction_type = (data.get("transaction_type") or "").upper()
             quantity         = data.get("quantity") or 0
             ts               = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
 
-            # Parse execution time and round down to nearest 15-min candle boundary
-            exec_dt     = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S")
-            candle_min  = (exec_dt.minute // 15) * 15
-            candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
-            candle_end   = candle_start + _td(minutes=15)
-            trade_date   = exec_dt.strftime("%Y-%m-%d")
-            from_dt      = candle_start.strftime("%Y-%m-%d %H:%M:%S")
-            to_dt        = candle_end.strftime("%Y-%m-%d %H:%M:%S")
+            # Parse execution time (Kite timestamps are in IST)
+            exec_dt = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S")
 
-            print(f"[order-update] {symbol} COMPLETE at {exec_dt.strftime('%H:%M:%S')} — fetching candle {candle_start.strftime('%H:%M')}–{candle_end.strftime('%H:%M')}")
+            # Round down to current 5-min candle start and end
+            candle_min   = (exec_dt.minute // 5) * 5
+            candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
+            candle_end   = candle_start + _td(minutes=5)
+            trade_date   = exec_dt.strftime("%Y-%m-%d")
+
+            # Calculate how many seconds until the 5-min candle completes
+            # Current IST time for accurate wait calculation
+            now_ist      = datetime.now(_tz(_td(hours=5, minutes=30))).replace(tzinfo=None)
+            wait_secs    = max(0, (candle_end - now_ist).total_seconds()) + 10  # +10s buffer
+            print(f"[order-update] {symbol} BUY COMPLETE at {exec_dt.strftime('%H:%M:%S')} IST — waiting {wait_secs:.0f}s for 5-min candle {candle_start.strftime('%H:%M')}–{candle_end.strftime('%H:%M')} to close")
+            time.sleep(wait_secs)
+
+            # Fetch the completed 5-min candle
             token   = get_token(kite, symbol)
-            candles = kite.historical_data(token, from_dt, to_dt, "15minute")
+            candles = kite.historical_data(
+                token,
+                candle_start.strftime("%Y-%m-%d %H:%M:%S"),
+                candle_end.strftime("%Y-%m-%d %H:%M:%S"),
+                "5minute"
+            )
 
             if candles:
                 c = candles[0]
                 with _db() as conn:
                     conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
                                  (c["high"], c["low"], data.get("order_id")))
-                print(f"[order-update] {symbol} COMPLETE: candle_high={c['high']} candle_low={c['low']}")
+                print(f"[order-update] {symbol}: 5-min candle high={c['high']} low={c['low']}")
 
-                # Place SELL SL order when BUY is complete
+                # Place SELL SL order for BUY completions only
                 if transaction_type == "BUY" and quantity > 0:
                     trigger_price = round(c["low"] - 1,   2)
                     limit_price   = round(c["low"] - 1.5, 2)
@@ -310,6 +323,8 @@ def _fetch_complete_candle(data: dict):
                         trigger_price    = trigger_price,
                     )
                     print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+            else:
+                print(f"[order-update] {symbol}: no 5-min candle data returned")
 
         except Exception as e:
             print(f"[order-update] candle fetch / sell order error: {e}")
