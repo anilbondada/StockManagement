@@ -689,7 +689,7 @@ def api_order_updates_table():
             SELECT order_id, exchange_order_id, tradingsymbol, transaction_type,
                    product, quantity, price, trigger_price, average_price,
                    exchange, order_type, is_open, is_trigger_pending, is_complete,
-                   is_rejected, is_cancelled, status_message,
+                   is_rejected, is_cancelled, is_webhook_order, status_message,
                    candle_high, candle_low, order_timestamp, last_updated
             FROM order_updates ORDER BY last_updated DESC
         """).fetchall()
@@ -768,7 +768,7 @@ def order_updates_table_ui():
         return;
       }
       let h = `<table><thead><tr>
-        <th>Symbol</th><th>Side</th><th>Qty</th><th>Product</th><th>Order Type</th>
+        <th>Symbol</th><th>Side</th><th>Webhook</th><th>Qty</th><th>Product</th><th>Order Type</th>
         <th>Price</th><th>Trigger</th><th>Avg Price</th>
         <th>Status</th><th>Candle High</th><th>Candle Low</th>
         <th>Order ID</th><th>Last Updated</th>
@@ -776,6 +776,7 @@ def order_updates_table_ui():
       h += rows.map(r => `<tr>
         <td><strong>${r.tradingsymbol||'—'}</strong></td>
         <td class="${(r.transaction_type||'').toLowerCase()}">${r.transaction_type||'—'}</td>
+        <td style="text-align:center">${r.is_webhook_order ? '<span class="badge" style="background:#d1fae5;color:#065f46">✓ Webhook</span>' : '<span style="color:#9ca3af;font-size:.78rem">Manual</span>'}</td>
         <td>${r.quantity||'—'}</td>
         <td>${r.product||'—'}</td>
         <td>${r.order_type||'—'}</td>
