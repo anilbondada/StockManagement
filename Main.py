@@ -65,7 +65,8 @@ _ticker        = None
 
 # ── KiteTicker (real-time order updates) ──────────────────────────────────────
 
-_ticker_shutdown = False
+_ticker_shutdown    = False
+_ticker_reconnecting = False
 
 
 def _load_token_from_json() -> Optional[str]:
@@ -103,8 +104,10 @@ def start_ticker(access_token: str):
         print("[ticker] Connected to Zerodha order stream.")
 
     def on_close(ws, code, reason):
+        global _ticker_reconnecting
         print(f"[ticker] Disconnected: {reason}")
-        if not _ticker_shutdown:
+        if not _ticker_shutdown and not _ticker_reconnecting:
+            _ticker_reconnecting = True
             import threading
             threading.Thread(target=_reconnect_ticker, args=(access_token,), daemon=True).start()
 
@@ -122,20 +125,24 @@ def start_ticker(access_token: str):
 
 def _reconnect_ticker(prev_token: str, delay: int = 30):
     """Reload token from file and restart ticker. Backs off if token unchanged."""
-    time.sleep(delay)
-    if _ticker_shutdown:
-        return
-    new_token = _load_token_from_json()
-    if not new_token:
-        print("[ticker] Reconnect skipped — no token in token.json")
-        return
-    if new_token == prev_token:
-        # Token hasn't changed yet — wait longer and retry
-        print(f"[ticker] Token unchanged, retrying in 60s...")
-        _reconnect_ticker(prev_token, delay=60)
-        return
-    print(f"[ticker] Reconnecting with refreshed token...")
-    start_ticker(new_token)
+    global _ticker_reconnecting
+    try:
+        time.sleep(delay)
+        if _ticker_shutdown:
+            return
+        new_token = _load_token_from_json()
+        if not new_token:
+            print("[ticker] Reconnect skipped — no token in token.json")
+            return
+        if new_token == prev_token:
+            print(f"[ticker] Token unchanged, retrying in 60s...")
+            time.sleep(60)
+            _reconnect_ticker(prev_token, delay=0)
+            return
+        print(f"[ticker] Reconnecting with refreshed token...")
+        start_ticker(new_token)
+    finally:
+        _ticker_reconnecting = False
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -356,10 +363,24 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
 
 
 def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
-    try:
-        kite = get_kite()
-    except Exception as e:
-        print(f"[candle fetch] alert_id={alert_id} kite auth failed: {e}")
+    # Try _access_token first, fall back to token.json
+    kite = None
+    for token in [_access_token, _load_token_from_json()]:
+        if not token:
+            continue
+        try:
+            kite = KiteConnect(api_key=API_KEY)
+            kite.set_access_token(token)
+            kite.profile()   # validate
+            if token != _access_token:
+                global _access_token
+                _access_token = token
+                print(f"[candle fetch] alert_id={alert_id} reloaded token from token.json")
+            break
+        except Exception:
+            kite = None
+    if not kite:
+        print(f"[candle fetch] alert_id={alert_id} no valid token available, skipping")
         return
 
     from_dt = f"{date_str} 09:15:00"
