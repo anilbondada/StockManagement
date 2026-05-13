@@ -47,7 +47,7 @@ def _cancel_pending_webhook_orders() -> dict:
 
     with _db() as conn:
         rows = conn.execute("""
-            SELECT order_id FROM order_updates
+            SELECT order_id, tradingsymbol, trigger_price, quantity FROM order_updates
             WHERE is_webhook_order = 1
               AND is_complete  = 0
               AND is_rejected  = 0
@@ -56,15 +56,15 @@ def _cancel_pending_webhook_orders() -> dict:
 
     cancelled = []
     errors    = []
-    for (order_id,) in rows:
+    for order_id, symbol, trigger, qty in rows:
         try:
             kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=str(order_id))
-            cancelled.append(order_id)
-            print(f"[control] Cancelled order {order_id}")
+            cancelled.append({"order_id": order_id, "symbol": symbol, "trigger": trigger, "qty": qty})
+            print(f"[control] Cancelled {symbol} order {order_id}")
         except Exception as e:
-            errors.append(f"{order_id}: {e}")
+            errors.append({"order_id": order_id, "symbol": symbol, "error": str(e)})
 
-    return {"cancelled": len(cancelled), "order_ids": cancelled, "errors": errors}
+    return {"cancelled": len(cancelled), "orders": cancelled, "errors": errors}
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ def control_pause():
     result = _cancel_pending_webhook_orders()
     _stop_ticker()
     print(f"[control] PAUSED — {result['cancelled']} orders cancelled, ticker disconnected")
-    return {"paused": True, **result}
+    return {"paused": True, "ticker": "disconnected", **result}
 
 
 @router.post("/api/control/resume")
@@ -124,7 +124,7 @@ def control_stop():
         print("[control] STOPPED — token.json deleted, ticker disconnected")
     except Exception as e:
         result["token_error"] = str(e)
-    return {"paused": True, "token_deleted": True, **result}
+    return {"paused": True, "ticker": "disconnected", "token_deleted": True, **result}
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -239,15 +239,49 @@ def control_ui():
       try {
         const r    = await fetch('/api/control/' + action, { method: 'POST' });
         const data = await r.json();
+        const hasErrors = data.errors?.length > 0;
 
-        let msg = '';
-        if (action === 'pause')  msg = `Paused. Cancelled ${data.cancelled} pending order(s).`;
-        if (action === 'resume') msg = 'Resumed. Webhook processing is active.';
-        if (action === 'stop')   msg = `Stopped. Cancelled ${data.cancelled} order(s). Token deleted.`;
-        if (data.errors?.length) msg += ' Errors: ' + data.errors.join(', ');
+        let html = '';
 
-        res.className     = 'result ' + (data.errors?.length ? 'warn' : 'ok');
-        res.textContent   = msg;
+        if (action === 'pause' || action === 'stop') {
+          html += `<div style="font-weight:700;margin-bottom:10px;font-size:.95rem">
+            ${action === 'stop' ? '⏹ System Stopped' : '⏸ System Paused'}
+          </div>`;
+          html += `<div style="margin-bottom:6px">🔌 KiteTicker: <strong>Disconnected</strong></div>`;
+          html += `<div style="margin-bottom:6px">🚫 ChartInk webhook: <strong>Disabled</strong></div>`;
+          if (action === 'stop') {
+            html += `<div style="margin-bottom:10px">🗑 Token: <strong>Deleted</strong></div>`;
+          }
+
+          if (data.cancelled > 0) {
+            html += `<div style="margin-bottom:6px;font-weight:600">Cancelled ${data.cancelled} pending order(s):</div>`;
+            html += '<table style="width:100%;border-collapse:collapse;font-size:.82rem;margin-top:4px">';
+            html += '<tr style="background:rgba(255,255,255,.05)"><th style="padding:5px 8px;text-align:left">Symbol</th><th style="padding:5px 8px;text-align:right">Trigger</th><th style="padding:5px 8px;text-align:right">Qty</th><th style="padding:5px 8px;text-align:left">Order ID</th></tr>';
+            data.orders.forEach(o => {
+              html += `<tr style="border-top:1px solid rgba(255,255,255,.08)">
+                <td style="padding:5px 8px"><strong>${o.symbol||'—'}</strong></td>
+                <td style="padding:5px 8px;text-align:right">₹${o.trigger||'—'}</td>
+                <td style="padding:5px 8px;text-align:right">${o.qty||'—'}</td>
+                <td style="padding:5px 8px;color:#9ca3af;font-size:.75rem">${o.order_id}</td>
+              </tr>`;
+            });
+            html += '</table>';
+          } else {
+            html += '<div style="color:#9ca3af">No pending webhook orders to cancel.</div>';
+          }
+
+          if (hasErrors) {
+            html += `<div style="margin-top:10px;color:#fca5a5">Errors: ${data.errors.map(e=>e.symbol+': '+e.error).join(', ')}</div>`;
+          }
+
+        } else if (action === 'resume') {
+          html += `<div style="font-weight:700;font-size:.95rem">▶ System Resumed</div>`;
+          html += `<div style="margin-top:6px">🔌 KiteTicker: <strong>Reconnected</strong></div>`;
+          html += `<div style="margin-top:4px">✅ ChartInk webhook: <strong>Active</strong></div>`;
+        }
+
+        res.className   = 'result ' + (hasErrors ? 'warn' : 'ok');
+        res.innerHTML   = html;
         res.style.display = 'block';
         refreshStatus();
       } catch(e) {
