@@ -212,6 +212,12 @@ def control_ui():
     </button>
   </div>
 
+  <div style="width:100%;max-width:480px;margin-top:12px">
+    <a href="/stock-config" style="display:flex;align-items:center;justify-content:center;gap:10px;padding:14px;background:#1e1e2e;color:#cdd6f4;border-radius:10px;text-decoration:none;font-size:.9rem;font-weight:600;transition:background .2s" onmouseover="this.style.background='#2a2a3e'" onmouseout="this.style.background='#1e1e2e'">
+      <span style="font-size:1.2rem">⚙️</span> Stock Config Management
+    </a>
+  </div>
+
   <div class="result" id="result"></div>
 
   <script>
