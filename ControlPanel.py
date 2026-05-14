@@ -72,8 +72,9 @@ def _cancel_pending_webhook_orders() -> dict:
 @router.get("/api/control/status")
 def control_status():
     return {
-        "paused":        _main._paused,
-        "authenticated": bool(_main._access_token),
+        "paused":           _main._paused,
+        "authenticated":    bool(_main._access_token),
+        "ticker_connected": _main._ticker_connected,
     }
 
 
@@ -183,6 +184,7 @@ def control_ui():
 
   <div class="status-bar">
     <div class="status-item"><span class="dot" id="auth-dot"></span>Auth: <strong id="auth-status">—</strong></div>
+    <div class="status-item"><span class="dot" id="ticker-dot"></span>Kite Listener: <strong id="ticker-status">—</strong></div>
     <div class="status-item"><span class="dot" id="sys-dot"></span>System: <strong id="sys-status">—</strong></div>
   </div>
 
@@ -225,11 +227,15 @@ def control_ui():
       try {
         const s = await (await fetch('/api/control/status')).json();
 
-        const authDot = document.getElementById('auth-dot');
-        const sysDot  = document.getElementById('sys-dot');
+        const authDot   = document.getElementById('auth-dot');
+        const tickerDot = document.getElementById('ticker-dot');
+        const sysDot    = document.getElementById('sys-dot');
 
         document.getElementById('auth-status').textContent = s.authenticated ? 'Connected' : 'Not authenticated';
         authDot.className = 'dot ' + (s.authenticated ? 'dot-green' : 'dot-red');
+
+        document.getElementById('ticker-status').textContent = s.ticker_connected ? 'Connected' : 'Disconnected';
+        tickerDot.className = 'dot ' + (s.ticker_connected ? 'dot-green' : 'dot-red');
 
         document.getElementById('sys-status').textContent = s.paused ? 'PAUSED' : 'Running';
         sysDot.className  = 'dot ' + (s.paused ? 'dot-yellow' : 'dot-green');

@@ -69,6 +69,7 @@ _ticker        = None
 
 _ticker_shutdown    = False
 _ticker_reconnecting = False
+_ticker_connected   = False
 _paused             = False
 
 
@@ -104,10 +105,13 @@ def start_ticker(access_token: str):
             )
 
     def on_connect(ws, response):
+        global _ticker_connected
+        _ticker_connected = True
         print("[ticker] Connected to Zerodha order stream.")
 
     def on_close(ws, code, reason):
-        global _ticker_reconnecting
+        global _ticker_reconnecting, _ticker_connected
+        _ticker_connected = False
         print(f"[ticker] Disconnected: {reason}")
         if not _ticker_shutdown and not _ticker_reconnecting:
             _ticker_reconnecting = True
