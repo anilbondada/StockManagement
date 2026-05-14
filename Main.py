@@ -25,6 +25,7 @@ import pandas as pd
 from get_access_token import get_login_url, get_access_token as fetch_access_token, API_KEY
 from ExcelUpload import router as excel_router
 from ControlPanel import router as control_router
+from StockConfig import router as config_router, get_config, qty_for_ltp, init_config_table
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -491,6 +492,7 @@ async def lifespan(_: FastAPI):
         _access_token = None
         print(f"No valid token found. Login here:\n{get_login_url()}")
     init_db()
+    init_config_table()
     yield
     global _ticker_shutdown
     _ticker_shutdown = True
@@ -501,6 +503,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Stock Management API", lifespan=lifespan)
 app.include_router(excel_router)
 app.include_router(control_router)
+app.include_router(config_router)
 
 # Token cache
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
@@ -1325,7 +1328,11 @@ def orders_ui():
 
 
 def _run_auto_orders(kite, rows: list) -> dict:
-    """Place SL BUY MIS orders for rows meeting criteria: pct_change < 8 and LTP <= 800."""
+    """Place SL BUY MIS orders using rules from stock_config table."""
+    cfg             = get_config()
+    skip_pct        = float(cfg.get("skip_pct_change", 8))
+    skip_ltp        = float(cfg.get("skip_ltp", 800))
+
     placed  = []
     skipped = []
     errors  = []
@@ -1335,20 +1342,21 @@ def _run_auto_orders(kite, rows: list) -> dict:
             quote = kite.ltp(f"NSE:{symbol}")
             ltp   = quote[f"NSE:{symbol}"]["last_price"]
 
-            if pct_change >= 8 or ltp > 800:
-                reason = f"pct_change={pct_change}% >= 8" if pct_change >= 8 else f"ltp={ltp} > 800"
+            if pct_change >= skip_pct or ltp > skip_ltp:
+                reason = f"pct_change={pct_change}% >= {skip_pct}" if pct_change >= skip_pct else f"ltp={ltp} > {skip_ltp}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 continue
 
             trigger_price = round(candle_high + 1, 2)
             limit_price   = round(candle_high + 1, 2)
+            quantity      = qty_for_ltp(ltp, cfg)
 
             order_id = kite.place_order(
                 variety          = kite.VARIETY_REGULAR,
                 exchange         = "NSE",
                 tradingsymbol    = symbol,
                 transaction_type = "BUY",
-                quantity         = 100,
+                quantity         = quantity,
                 product          = "MIS",
                 order_type       = "SL",
                 validity         = "DAY",
@@ -1356,7 +1364,7 @@ def _run_auto_orders(kite, rows: list) -> dict:
                 trigger_price    = trigger_price,
             )
             placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price,
-                            "limit": limit_price, "ltp": ltp, "pct_change": pct_change})
+                            "limit": limit_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
             print(f"[auto-order] {symbol}: order_id={order_id} trigger={trigger_price} limit={limit_price}")
             # Mark as webhook-originated so SELL logic applies
             with _db() as conn:
