@@ -82,7 +82,9 @@ def _load_token_from_json() -> Optional[str]:
 
 
 def start_ticker(access_token: str):
-    global _ticker
+    global _ticker, _ticker_reconnecting
+    # Block on_close from spawning a parallel reconnect while we restart
+    _ticker_reconnecting = True
     if _ticker:
         try:
             _ticker.close()
@@ -127,6 +129,7 @@ def start_ticker(access_token: str):
     ticker.on_error         = on_error
     ticker.connect(threaded=True)
     _ticker = ticker
+    _ticker_reconnecting = False
     return ticker
 
 
