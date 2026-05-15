@@ -231,8 +231,9 @@ def control_ui():
         const tickerDot = document.getElementById('ticker-dot');
         const sysDot    = document.getElementById('sys-dot');
 
-        document.getElementById('auth-status').textContent = s.authenticated ? 'Connected' : 'Not authenticated';
-        authDot.className = 'dot ' + (s.authenticated ? 'dot-green' : 'dot-red');
+        const authReady = s.authenticated && s.ticker_connected;
+        document.getElementById('auth-status').textContent = authReady ? 'Connected' : s.authenticated ? 'Token loaded' : 'Not authenticated';
+        authDot.className = 'dot ' + (authReady ? 'dot-green' : s.authenticated ? 'dot-yellow' : 'dot-red');
 
         document.getElementById('ticker-status').textContent = s.ticker_connected ? 'Connected' : 'Disconnected';
         tickerDot.className = 'dot ' + (s.ticker_connected ? 'dot-green' : 'dot-red');
