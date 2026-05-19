@@ -107,8 +107,9 @@ def start_ticker(access_token: str):
             )
 
     def on_connect(ws, response):
-        global _ticker_connected
-        _ticker_connected = True
+        global _ticker_connected, _ticker_reconnecting
+        _ticker_connected   = True
+        _ticker_reconnecting = False   # clear here — after confirmed connected
         print("[ticker] Connected to Zerodha order stream.")
 
     def on_close(ws, code, reason):
@@ -129,7 +130,7 @@ def start_ticker(access_token: str):
     ticker.on_error         = on_error
     ticker.connect(threaded=True)
     _ticker = ticker
-    _ticker_reconnecting = False
+    # _ticker_reconnecting stays True until on_connect fires
     return ticker
 
 
