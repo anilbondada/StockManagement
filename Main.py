@@ -263,8 +263,32 @@ def upsert_order_update(data: dict):
     with _db() as conn:
         existing = conn.execute("SELECT id FROM order_updates WHERE order_id=?", (order_id,)).fetchone()
         if existing:
-            sets = ["average_price=?", "status_message=?", "last_updated=?"]
-            vals = [data.get("average_price"), data.get("status_message"), now]
+            sets = [
+                "exchange_order_id=COALESCE(exchange_order_id,?)",
+                "product=COALESCE(product,?)",
+                "quantity=COALESCE(quantity,?)",
+                "price=COALESCE(price,?)",
+                "trigger_price=COALESCE(trigger_price,?)",
+                "exchange=COALESCE(exchange,?)",
+                "order_type=COALESCE(order_type,?)",
+                "order_timestamp=COALESCE(order_timestamp,?)",
+                "average_price=?",
+                "status_message=?",
+                "last_updated=?",
+            ]
+            vals = [
+                data.get("exchange_order_id"),
+                data.get("product"),
+                data.get("quantity"),
+                data.get("price"),
+                data.get("trigger_price"),
+                data.get("exchange"),
+                data.get("order_type"),
+                data.get("order_timestamp"),
+                data.get("average_price"),
+                data.get("status_message"),
+                now,
+            ]
             if col:
                 sets.append(f"{col}=1")
             conn.execute(f"UPDATE order_updates SET {', '.join(sets)} WHERE order_id=?",
