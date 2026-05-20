@@ -387,6 +387,14 @@ def _fetch_complete_candle(data: dict):
                         trigger_price    = trigger_price,
                     )
                     print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+                    # Mark SELL order as webhook-originated
+                    with _db() as conn:
+                        conn.execute(
+                            """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                               VALUES (?,?,?,1,?)
+                               ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                            (str(sell_order_id), symbol, "SELL", datetime.now(timezone.utc).isoformat())
+                        )
             else:
                 print(f"[order-update] {symbol}: no 5-min candle data returned")
 
