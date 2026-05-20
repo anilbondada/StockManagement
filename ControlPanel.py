@@ -96,6 +96,16 @@ def _start_ticker():
         print("[control] No token — KiteTicker not started")
 
 
+@router.post("/api/control/force-connect")
+def control_force_connect():
+    token = _load_token_from_json() or _main._access_token
+    if not token:
+        raise HTTPException(status_code=401, detail="No token available. Login first.")
+    _main._access_token = token
+    _start_ticker()
+    return {"message": "Force connect initiated", "token_loaded": bool(token)}
+
+
 @router.post("/api/control/pause")
 def control_pause():
     _main._paused = True
@@ -186,6 +196,10 @@ def control_ui():
     <div class="status-item"><span class="dot" id="auth-dot"></span>Auth: <strong id="auth-status">—</strong></div>
     <div class="status-item"><span class="dot" id="ticker-dot"></span>Kite Listener: <strong id="ticker-status">—</strong></div>
     <div class="status-item"><span class="dot" id="sys-dot"></span>System: <strong id="sys-status">—</strong></div>
+    <button id="forceConnectBtn" onclick="forceConnect()"
+      style="padding:6px 14px;border:none;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;background:#4f46e5;color:#fff;display:none">
+      ⚡ Force Connect
+    </button>
   </div>
 
   <div class="buttons">
@@ -237,6 +251,9 @@ def control_ui():
 
         document.getElementById('ticker-status').textContent = s.ticker_connected ? 'Connected' : 'Disconnected';
         tickerDot.className = 'dot ' + (s.ticker_connected ? 'dot-green' : 'dot-red');
+        const fcBtn = document.getElementById('forceConnectBtn');
+        fcBtn.style.display = s.ticker_connected ? 'none' : 'inline-block';
+        fcBtn.disabled      = s.ticker_connected;
 
         document.getElementById('sys-status').textContent = s.paused ? 'PAUSED' : 'Running';
         sysDot.className  = 'dot ' + (s.paused ? 'dot-yellow' : 'dot-green');
@@ -244,6 +261,29 @@ def control_ui():
         document.getElementById('pauseBtn').disabled  = s.paused;
         document.getElementById('resumeBtn').disabled = !s.paused;
       } catch(e) {}
+    }
+
+    async function forceConnect() {
+      const btn   = document.getElementById('forceConnectBtn');
+      const res   = document.getElementById('result');
+      btn.disabled = true;
+      btn.textContent = '⏳ Connecting...';
+      res.style.display = 'none';
+      try {
+        const r    = await fetch('/api/control/force-connect', { method: 'POST' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail);
+        res.className   = 'result ok';
+        res.innerHTML   = '⚡ Force connect initiated — checking status in 5s...';
+        res.style.display = 'block';
+        setTimeout(refreshStatus, 5000);
+      } catch(e) {
+        res.className   = 'result err';
+        res.textContent = 'Force connect failed: ' + e.message;
+        res.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = '⚡ Force Connect';
+      }
     }
 
     function doLogin() {
