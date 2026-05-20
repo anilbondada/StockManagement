@@ -137,23 +137,36 @@ def start_ticker(access_token: str):
 def _reconnect_ticker(prev_token: str, delay: int = 30):
     """Reload token from file and restart ticker. Backs off if token unchanged."""
     global _ticker_reconnecting
-    try:
-        time.sleep(delay)
-        if _ticker_shutdown:
-            return
-        new_token = _load_token_from_json()
-        if not new_token:
-            print("[ticker] Reconnect skipped — no token in token.json")
-            return
-        if new_token == prev_token:
-            print(f"[ticker] Token unchanged, retrying in 60s...")
-            time.sleep(60)
-            _reconnect_ticker(prev_token, delay=0)
-            return
-        print(f"[ticker] Reconnecting with refreshed token...")
-        start_ticker(new_token)
-    finally:
+    time.sleep(delay)
+
+    if _ticker_shutdown:
         _ticker_reconnecting = False
+        return
+
+    # /callback may have already connected — don't compete with it
+    if _ticker_connected:
+        print("[ticker] Already connected externally, skipping reconnect")
+        _ticker_reconnecting = False
+        return
+
+    new_token = _load_token_from_json()
+    if not new_token:
+        print("[ticker] Reconnect skipped — no token in token.json")
+        _ticker_reconnecting = False
+        return
+
+    if new_token == prev_token:
+        print(f"[ticker] Token unchanged, retrying in 60s...")
+        time.sleep(60)
+        if not _ticker_connected:            # check again after wait
+            _reconnect_ticker(prev_token, delay=0)
+        else:
+            _ticker_reconnecting = False
+        return
+
+    print(f"[ticker] Reconnecting with refreshed token...")
+    start_ticker(new_token)
+    # _ticker_reconnecting cleared by on_connect, not here
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
