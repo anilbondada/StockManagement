@@ -26,6 +26,14 @@ from get_access_token import get_login_url, get_access_token as fetch_access_tok
 from ExcelUpload import router as excel_router
 from ControlPanel import router as control_router
 from StockConfig import router as config_router, get_config, qty_for_ltp, init_config_table
+from LiveStockManager import (
+    router as live_router,
+    on_ticks as _live_on_ticks,
+    subscribe_to_stock,
+    resubscribe_all,
+    eod_cleanup as _live_eod_cleanup,
+    init_live_table,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -59,15 +67,17 @@ class ConnectionManager:
             except Exception:
                 self.active.remove(ws)
 
-manager        = ConnectionManager()
-order_manager  = ConnectionManager()
-_main_loop     = None
-_ticker        = None
+manager       = ConnectionManager()
+order_manager = ConnectionManager()
+_main_loop    = None
+_ticker       = None
 
 
 # ── KiteTicker (real-time order updates) ──────────────────────────────────────
 
 _ticker_shutdown    = False
+
+
 _ticker_reconnecting = False
 _ticker_connected   = False
 _paused             = False
@@ -96,7 +106,9 @@ def start_ticker(access_token: str):
     def on_order_update(ws, data):
         try:
             upsert_order_update(data)
-            if (data.get("status") or "").upper() == "COMPLETE":
+            status = (data.get("status") or "").upper()
+            tx     = (data.get("transaction_type") or "").upper()
+            if status == "COMPLETE" and tx == "BUY":
                 _fetch_complete_candle(data)
         except Exception as e:
             print(f"[order-update] DB error: {e}")
@@ -108,9 +120,10 @@ def start_ticker(access_token: str):
 
     def on_connect(ws, response):
         global _ticker_connected, _ticker_reconnecting
-        _ticker_connected   = True
-        _ticker_reconnecting = False   # clear here — after confirmed connected
+        _ticker_connected    = True
+        _ticker_reconnecting = False
         print("[ticker] Connected to Zerodha order stream.")
+        resubscribe_all(ws)
 
     def on_close(ws, code, reason):
         global _ticker_reconnecting, _ticker_connected
@@ -124,6 +137,7 @@ def start_ticker(access_token: str):
     def on_error(ws, code, reason):
         print(f"[ticker] Error {code}: {reason}")
 
+    ticker.on_ticks         = _live_on_ticks
     ticker.on_order_update  = on_order_update
     ticker.on_connect       = on_connect
     ticker.on_close         = on_close
@@ -250,6 +264,7 @@ def init_db():
         ou_cols = {r[1] for r in conn.execute("PRAGMA table_info(order_updates)").fetchall()}
         if "is_webhook_order" not in ou_cols:
             conn.execute("ALTER TABLE order_updates ADD COLUMN is_webhook_order INTEGER DEFAULT 0")
+
 
 
 def upsert_order_update(data: dict):
@@ -387,6 +402,7 @@ def _fetch_complete_candle(data: dict):
                         trigger_price    = trigger_price,
                     )
                     print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+                    subscribe_to_stock(symbol, trigger_price)
                     # Mark SELL order as webhook-originated
                     with _db() as conn:
                         conn.execute(
@@ -532,7 +548,6 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
 
 
 
-@asynccontextmanager
 async def lifespan(_: FastAPI):
     global _access_token, _main_loop
     _main_loop = asyncio.get_running_loop()
@@ -546,7 +561,10 @@ async def lifespan(_: FastAPI):
         print(f"No valid token found. Login here:\n{get_login_url()}")
     init_db()
     init_config_table()
+    init_live_table()
+    eod_task = asyncio.create_task(_live_eod_cleanup())
     yield
+    eod_task.cancel()
     global _ticker_shutdown
     _ticker_shutdown = True
     if _ticker:
@@ -557,6 +575,7 @@ app = FastAPI(title="Stock Management API", lifespan=lifespan)
 app.include_router(excel_router)
 app.include_router(control_router)
 app.include_router(config_router)
+app.include_router(live_router)
 
 # Token cache
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
@@ -741,6 +760,7 @@ class MorningStarsResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Hello, Anil!", "status": "running"}
+
 
 
 @app.get("/manifest.json")
