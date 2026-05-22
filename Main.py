@@ -32,6 +32,7 @@ from LiveStockManager import (
     resubscribe_all,
     eod_cleanup as _live_eod_cleanup,
     init_live_table,
+    restore_subscriptions,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,6 +590,7 @@ async def lifespan(_: FastAPI):
     init_db()
     init_config_table()
     init_live_table()
+    restore_subscriptions()   # rebuild _active_subs from DB after restart
     eod_task = asyncio.create_task(_live_eod_cleanup())
     yield
     eod_task.cancel()

@@ -79,6 +79,53 @@ def init_live_table():
         """)
 
 
+def restore_subscriptions():
+    """On startup, re-populate _active_subs from today's webhook BUY orders.
+
+    _active_subs is in-memory only. After a service restart during market hours
+    the subscriptions are gone. This rebuilds them from order_updates so that
+    resubscribe_all() can re-subscribe everything when on_connect fires.
+    """
+    import Main as _main
+    from datetime import date as _date
+    today = str(_date.today())
+    try:
+        with _db() as conn:
+            # For each today webhook BUY: join to find the SELL SL trigger price (sl_price).
+            # SELL trigger_price is None if BUY hasn't completed / SELL not placed yet.
+            rows = conn.execute("""
+                SELECT b.tradingsymbol, s.trigger_price
+                FROM order_updates b
+                LEFT JOIN order_updates s
+                       ON s.tradingsymbol   = b.tradingsymbol
+                      AND s.transaction_type = 'SELL'
+                      AND s.is_webhook_order = 1
+                      AND DATE(s.last_updated) = ?
+                WHERE b.is_webhook_order  = 1
+                  AND b.transaction_type  = 'BUY'
+                  AND DATE(b.last_updated) = ?
+                  AND b.is_cancelled = 0
+                  AND b.is_rejected  = 0
+            """, (today, today)).fetchall()
+
+        if not rows:
+            return
+
+        kite = _main.get_kite()
+        for symbol, sl_price in rows:
+            if not symbol:
+                continue
+            try:
+                token = _main.get_token(kite, symbol)
+                _active_subs[token] = {"symbol": symbol, "sl_price": sl_price}
+                print(f"[live] Restored subscription {symbol} sl={sl_price}")
+            except Exception as e:
+                print(f"[live] Restore subscription error {symbol}: {e}")
+        print(f"[live] Restored {len(rows)} subscriptions from DB")
+    except Exception as e:
+        print(f"[live] restore_subscriptions error: {e}")
+
+
 # ── Candle helpers ────────────────────────────────────────────────────────────
 
 def _candle_start(dt: datetime) -> datetime:
