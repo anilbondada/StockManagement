@@ -162,10 +162,11 @@ def on_ticks(ws, ticks):
 
 # ── Subscribe / Unsubscribe ───────────────────────────────────────────────────
 
-def subscribe_to_stock(symbol: str, sl_price: float):
+def subscribe_to_stock(symbol: str, sl_price, kite=None):
     import Main as _main
     try:
-        kite  = _main.get_kite()
+        if kite is None:
+            kite = _main.get_kite()
         token = _main.get_token(kite, symbol)
         _active_subs[token] = {"symbol": symbol, "sl_price": sl_price}
         if _main._ticker:

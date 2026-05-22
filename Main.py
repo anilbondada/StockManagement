@@ -1468,7 +1468,8 @@ def _run_auto_orders(kite, rows: list) -> dict:
             print(f"[auto-order] {symbol}: order_id={order_id} trigger={trigger_price} limit={limit_price}")
             # Subscribe immediately so ticks stream from order placement.
             # sl_price=None until SELL SL is placed (updated by _fetch_complete_candle).
-            subscribe_to_stock(symbol, None)
+            # Pass the existing kite instance so the instruments cache is reused.
+            subscribe_to_stock(symbol, None, kite=kite)
             # Mark as webhook-originated so SELL logic applies
             with _db() as conn:
                 conn.execute(
