@@ -16,7 +16,6 @@ import time
 from datetime import date, datetime, timezone
 from typing import Optional, List
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from kiteconnect import KiteConnect, KiteTicker
@@ -129,7 +128,11 @@ def start_ticker(access_token: str):
         global _ticker_reconnecting, _ticker_connected
         _ticker_connected = False
         print(f"[ticker] Disconnected: {reason}")
-        if not _ticker_shutdown and not _ticker_reconnecting:
+        # Use `ticker is _ticker` instead of `not _ticker_reconnecting`:
+        # - stale tickers (replaced by a newer start_ticker call) are ignored
+        # - the current ticker always triggers a reconnect, even if a previous
+        #   connection attempt failed and left _ticker_reconnecting=True stuck
+        if not _ticker_shutdown and ticker is _ticker:
             _ticker_reconnecting = True
             import threading
             threading.Thread(target=_reconnect_ticker, args=(access_token,), daemon=True).start()
@@ -330,17 +333,42 @@ def upsert_order_update(data: dict):
             ))
 
 
+_processing_buy_orders: set = set()   # order_ids currently being handled (in-memory dedup)
+_processing_lock = __import__("threading").Lock()
+
+
 def _fetch_complete_candle(data: dict):
     import threading
     from datetime import timedelta as _td, timezone as _tz
 
+    order_id         = data.get("order_id")
+    symbol           = data.get("tradingsymbol")
+    transaction_type = (data.get("transaction_type") or "").upper()
+    quantity         = data.get("quantity") or 0
+
+    # In-memory dedup: guard against duplicate COMPLETE events in the same session
+    with _processing_lock:
+        if order_id in _processing_buy_orders:
+            print(f"[order-update] {symbol} {order_id}: duplicate COMPLETE event ignored (already in-flight)")
+            return
+        _processing_buy_orders.add(order_id)
+
     def _run():
         try:
-            kite             = get_kite()
-            symbol           = data.get("tradingsymbol")
-            transaction_type = (data.get("transaction_type") or "").upper()
-            quantity         = data.get("quantity") or 0
-            ts               = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
+            # DB-based dedup: guard against COMPLETE events replayed after ticker reconnect
+            with _db() as conn:
+                row = conn.execute(
+                    "SELECT candle_high, is_webhook_order FROM order_updates WHERE order_id=?",
+                    (order_id,)
+                ).fetchone()
+            if row and row[0] is not None:
+                print(f"[order-update] {symbol} {order_id}: already processed (candle_high exists), skipping duplicate")
+                return
+
+            is_webhook = row and row[1] == 1
+
+            kite = get_kite()
+            ts   = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
 
             # Parse execution time (Kite timestamps are in IST)
             exec_dt = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S")
@@ -349,73 +377,72 @@ def _fetch_complete_candle(data: dict):
             candle_min   = (exec_dt.minute // 5) * 5
             candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
             candle_end   = candle_start + _td(minutes=5)
-            trade_date   = exec_dt.strftime("%Y-%m-%d")
 
-            # Calculate how many seconds until the 5-min candle completes
-            # Current IST time for accurate wait calculation
-            now_ist      = datetime.now(_tz(_td(hours=5, minutes=30))).replace(tzinfo=None)
-            wait_secs    = max(0, (candle_end - now_ist).total_seconds()) + 10  # +10s buffer
+            # Wait until the 5-min candle closes (+10s buffer for data availability)
+            now_ist   = datetime.now(_tz(_td(hours=5, minutes=30))).replace(tzinfo=None)
+            wait_secs = max(0, (candle_end - now_ist).total_seconds()) + 10
             print(f"[order-update] {symbol} BUY COMPLETE at {exec_dt.strftime('%H:%M:%S')} IST — waiting {wait_secs:.0f}s for 5-min candle {candle_start.strftime('%H:%M')}–{candle_end.strftime('%H:%M')} to close")
             time.sleep(wait_secs)
 
-            # Fetch the completed 5-min candle
-            token   = get_token(kite, symbol)
-            candles = kite.historical_data(
-                token,
-                candle_start.strftime("%Y-%m-%d %H:%M:%S"),
-                candle_end.strftime("%Y-%m-%d %H:%M:%S"),
-                "5minute"
-            )
+            # Fetch the completed 5-min candle (retry once on empty response)
+            token = get_token(kite, symbol)
+            from_str = candle_start.strftime("%Y-%m-%d %H:%M:%S")
+            to_str   = candle_end.strftime("%Y-%m-%d %H:%M:%S")
+            candles  = kite.historical_data(token, from_str, to_str, "5minute")
+            if not candles:
+                print(f"[order-update] {symbol}: no candle data, retrying in 15s...")
+                time.sleep(15)
+                candles = kite.historical_data(token, from_str, to_str, "5minute")
 
-            if candles:
-                c = candles[0]
-                with _db() as conn:
-                    conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
-                                 (c["high"], c["low"], data.get("order_id")))
-                print(f"[order-update] {symbol}: 5-min candle high={c['high']} low={c['low']}")
+            if not candles:
+                print(f"[order-update] {symbol}: candle data unavailable after retry — SELL order NOT placed")
+                return
 
-                # Place SELL SL only for BUY orders placed via ChartInk webhook
-                with _db() as conn:
-                    row = conn.execute(
-                        "SELECT is_webhook_order FROM order_updates WHERE order_id=?",
-                        (data.get("order_id"),)
+            c = candles[0]
+            with _db() as conn:
+                conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
+                             (c["high"], c["low"], order_id))
+                if row is None:  # is_webhook not read yet (row was None = no DB row at dedup check time)
+                    row2 = conn.execute(
+                        "SELECT is_webhook_order FROM order_updates WHERE order_id=?", (order_id,)
                     ).fetchone()
-                is_webhook = row and row[0] == 1
+                    is_webhook = row2 and row2[0] == 1
+            print(f"[order-update] {symbol}: 5-min candle high={c['high']} low={c['low']}")
 
-                if _paused:
-                    print(f"[sell-order] {symbol}: skipped — system is PAUSED")
-                elif not is_webhook:
-                    print(f"[sell-order] {symbol}: skipped — not a webhook order")
-                elif transaction_type == "BUY" and quantity > 0:
-                    trigger_price = round(c["low"] - 1,   2)
-                    limit_price   = round(c["low"] - 1.5, 2)
-                    sell_order_id = kite.place_order(
-                        variety          = kite.VARIETY_REGULAR,
-                        exchange         = data.get("exchange", "NSE"),
-                        tradingsymbol    = symbol,
-                        transaction_type = "SELL",
-                        quantity         = quantity,
-                        product          = data.get("product", "MIS"),
-                        order_type       = "SL",
-                        validity         = "DAY",
-                        price            = limit_price,
-                        trigger_price    = trigger_price,
+            if _paused:
+                print(f"[sell-order] {symbol}: skipped — system is PAUSED")
+            elif not is_webhook:
+                print(f"[sell-order] {symbol}: skipped — not a webhook order")
+            elif transaction_type == "BUY" and quantity > 0:
+                trigger_price = round(c["low"] - 1,   2)
+                limit_price   = round(c["low"] - 1.5, 2)
+                sell_order_id = kite.place_order(
+                    variety          = kite.VARIETY_REGULAR,
+                    exchange         = data.get("exchange", "NSE"),
+                    tradingsymbol    = symbol,
+                    transaction_type = "SELL",
+                    quantity         = quantity,
+                    product          = data.get("product", "MIS"),
+                    order_type       = "SL",
+                    validity         = "DAY",
+                    price            = limit_price,
+                    trigger_price    = trigger_price,
+                )
+                print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+                subscribe_to_stock(symbol, trigger_price)
+                with _db() as conn:
+                    conn.execute(
+                        """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                           VALUES (?,?,?,1,?)
+                           ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                        (str(sell_order_id), symbol, "SELL", datetime.now(timezone.utc).isoformat())
                     )
-                    print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
-                    subscribe_to_stock(symbol, trigger_price)
-                    # Mark SELL order as webhook-originated
-                    with _db() as conn:
-                        conn.execute(
-                            """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
-                               VALUES (?,?,?,1,?)
-                               ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
-                            (str(sell_order_id), symbol, "SELL", datetime.now(timezone.utc).isoformat())
-                        )
-            else:
-                print(f"[order-update] {symbol}: no 5-min candle data returned")
 
         except Exception as e:
             print(f"[order-update] candle fetch / sell order error: {e}")
+        finally:
+            _processing_buy_orders.discard(order_id)
+
     threading.Thread(target=_run, daemon=True).start()
 
 

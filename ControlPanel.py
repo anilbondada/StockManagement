@@ -98,7 +98,7 @@ def _start_ticker():
 
 @router.post("/api/control/force-connect")
 def control_force_connect():
-    token = _load_token_from_json() or _main._access_token
+    token = _main._load_token_from_json() or _main._access_token
     if not token:
         raise HTTPException(status_code=401, detail="No token available. Login first.")
     _main._access_token = token
