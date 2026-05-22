@@ -281,6 +281,7 @@ def live_candles_ui():
     </div>
     <div class="controls">
       <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
+      <button onclick="loadHistory()">Refresh</button>
       <button onclick="rows=[];render()">Clear</button>
     </div>
   </div>
@@ -314,12 +315,27 @@ def live_candles_ui():
       }).join('');
     }
 
-    const ws = new WebSocket(`ws://${location.host}/ws/live-candles`);
+    async function loadHistory() {
+      try {
+        const d = await (await fetch('/api/live-candles')).json();
+        rows = d;
+        render();
+      } catch(e) { console.error('fetch failed', e); }
+    }
+
+    // Use wss:// on HTTPS pages to avoid mixed-content browser block
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
     ws.onopen    = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live — 5-min candles streaming'; };
-    ws.onclose   = () => { document.getElementById('dot').classList.remove('live'); document.getElementById('st').textContent = 'Disconnected'; };
+    ws.onclose   = () => {
+      document.getElementById('dot').classList.remove('live');
+      document.getElementById('st').textContent = 'Disconnected — polling every 30s';
+      // Fall back to polling when WebSocket is unavailable
+      setInterval(loadHistory, 30000);
+    };
     ws.onmessage = e => { rows.unshift(JSON.parse(e.data)); if(rows.length>500) rows.pop(); render(); };
 
-    fetch('/api/live-candles').then(r=>r.json()).then(d=>{rows=d;render();});
+    loadHistory();
   </script>
 </body>
 </html>
