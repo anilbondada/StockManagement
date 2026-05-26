@@ -93,11 +93,12 @@ def _load_token_from_json() -> Optional[str]:
 
 def start_ticker(access_token: str):
     global _ticker, _ticker_reconnecting
-    # Block on_close from spawning a parallel reconnect while we restart
     _ticker_reconnecting = True
-    if _ticker:
+    old = _ticker
+    _ticker = None          # null out before close so old on_close sees (ticker is None) → skips reconnect
+    if old:
         try:
-            _ticker.close()
+            old.close()
         except Exception:
             pass
 
@@ -129,10 +130,8 @@ def start_ticker(access_token: str):
         global _ticker_reconnecting, _ticker_connected
         _ticker_connected = False
         print(f"[ticker] Disconnected: {reason}")
-        # Use `ticker is _ticker` instead of `not _ticker_reconnecting`:
-        # - stale tickers (replaced by a newer start_ticker call) are ignored
-        # - the current ticker always triggers a reconnect, even if a previous
-        #   connection attempt failed and left _ticker_reconnecting=True stuck
+        # Only reconnect if this is still the active ticker (not one that was replaced by start_ticker).
+        # start_ticker sets _ticker=None before closing old ticker, so old on_close skips this.
         if not _ticker_shutdown and ticker is _ticker:
             _ticker_reconnecting = True
             import threading
