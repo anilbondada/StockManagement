@@ -1440,12 +1440,21 @@ def _run_auto_orders(kite, rows: list) -> dict:
 
     for symbol, candle_high, pct_change in rows:
         try:
-            quote = kite.ltp(f"NSE:{symbol}")
-            ltp   = quote[f"NSE:{symbol}"]["last_price"]
+            quote    = kite.quote(f"NSE:{symbol}")
+            qdata    = quote[f"NSE:{symbol}"]
+            ltp      = qdata["last_price"]
+            buy_qty  = qdata.get("buy_quantity", 0)
+            sell_qty = qdata.get("sell_quantity", 0)
 
             if pct_change >= skip_pct or ltp > skip_ltp:
                 reason = f"pct_change={pct_change}% >= {skip_pct}" if pct_change >= skip_pct else f"ltp={ltp} > {skip_ltp}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
+                continue
+
+            if buy_qty < 100000 or sell_qty < 100000:
+                reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= 100000"
+                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
+                print(f"[auto-order] {symbol}: skipped — {reason}")
                 continue
 
             trigger_price = round(candle_high + 1, 2)
