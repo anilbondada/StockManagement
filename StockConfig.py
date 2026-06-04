@@ -15,12 +15,13 @@ router = APIRouter()
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 DEFAULTS = {
-    "skip_pct_change":  "8",     # skip if pct_change >= this
-    "skip_ltp":         "800",   # skip if LTP > this
-    "qty_1_500":        "100",   # qty for LTP 1–500
-    "qty_500_800":      "100",   # qty for LTP 500–800
-    "qty_800_1000":     "50",    # qty for LTP 800–1000
-    "qty_1000_plus":    "25",    # qty for LTP > 1000
+    "skip_pct_change":  "8",      # skip if pct_change >= this
+    "skip_ltp":         "800",    # skip if LTP > this
+    "min_book_qty":     "100000", # skip if buy_qty or sell_qty < this
+    "qty_1_500":        "100",    # qty for LTP 1–500
+    "qty_500_800":      "100",    # qty for LTP 500–800
+    "qty_800_1000":     "50",     # qty for LTP 800–1000
+    "qty_1000_plus":    "25",     # qty for LTP > 1000
 }
 
 

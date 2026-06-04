@@ -1433,6 +1433,7 @@ def _run_auto_orders(kite, rows: list) -> dict:
     cfg             = get_config()
     skip_pct        = float(cfg.get("skip_pct_change", 8))
     skip_ltp        = float(cfg.get("skip_ltp", 800))
+    min_book_qty    = int(cfg.get("min_book_qty", 100000))
 
     placed  = []
     skipped = []
@@ -1451,8 +1452,8 @@ def _run_auto_orders(kite, rows: list) -> dict:
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 continue
 
-            if buy_qty < 100000 or sell_qty < 100000:
-                reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= 100000"
+            if buy_qty < min_book_qty or sell_qty < min_book_qty:
+                reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 print(f"[auto-order] {symbol}: skipped — {reason}")
                 continue
