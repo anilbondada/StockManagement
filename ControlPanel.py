@@ -74,7 +74,7 @@ def control_status():
     return {
         "paused":           _main._paused,
         "authenticated":    bool(_main._access_token),
-        "ticker_connected": _main._ticker_connected,
+        "ticker_connected": bool(_main._ticker and _main._ticker.is_connected()),
     }
 
 

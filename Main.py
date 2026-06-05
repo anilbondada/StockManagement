@@ -79,7 +79,6 @@ _ticker_shutdown    = False
 
 
 _ticker_reconnecting = False
-_ticker_connected   = False
 _paused             = False
 
 
@@ -133,8 +132,7 @@ def start_ticker(access_token: str):
             )
 
     def on_connect(ws, response):
-        global _ticker_connected, _ticker_reconnecting
-        _ticker_connected    = True
+        global _ticker_reconnecting
         _ticker_reconnecting = False
         print("[ticker] Connected to Zerodha order stream.")
         resubscribe_all(ws)
@@ -142,8 +140,7 @@ def start_ticker(access_token: str):
         threading.Thread(target=_sync_orders_from_rest, args=(access_token,), daemon=True).start()
 
     def on_close(ws, code, reason):
-        global _ticker_reconnecting, _ticker_connected
-        _ticker_connected = False
+        global _ticker_reconnecting
         print(f"[ticker] Disconnected: {reason}")
         # Only reconnect if this is still the active ticker (not one that was replaced by start_ticker).
         # start_ticker sets _ticker=None before closing old ticker, so old on_close skips this.
@@ -175,7 +172,7 @@ def _reconnect_ticker(prev_token: str, delay: int = 30):
         return
 
     # /callback may have already connected — don't compete with it
-    if _ticker_connected:
+    if _ticker and _ticker.is_connected():
         print("[ticker] Already connected externally, skipping reconnect")
         _ticker_reconnecting = False
         return
@@ -189,7 +186,7 @@ def _reconnect_ticker(prev_token: str, delay: int = 30):
     if new_token == prev_token:
         print(f"[ticker] Token unchanged, retrying in 60s...")
         time.sleep(60)
-        if not _ticker_connected:            # check again after wait
+        if not (_ticker and _ticker.is_connected()):  # check again after wait
             _reconnect_ticker(prev_token, delay=0)
         else:
             _ticker_reconnecting = False
