@@ -28,13 +28,15 @@ DEFAULTS = {
 # ── StockInPlay defaults ──────────────────────────────────────────────────────
 
 SIP_DEFAULTS = {
-    "skip_pct_change":  "8",
-    "skip_ltp":         "800",
-    "min_book_qty":     "100000",
-    "qty_1_500":        "100",
-    "qty_500_800":      "100",
-    "qty_800_1000":     "50",
-    "qty_1000_plus":    "25",
+    "skip_pct_change":       "8",
+    "skip_ltp":              "800",
+    "min_book_qty":          "100000",
+    "qty_1_500":             "100",
+    "qty_500_800":           "100",
+    "qty_800_1000":          "50",
+    "qty_1000_plus":         "25",
+    "min_upper_circuit_pct": "20",   # skip if upper circuit % <= this
+    "max_entry_gain_pct":    "10",   # skip if limit price >= prev_close * (1 + this/100)
 }
 
 
@@ -316,6 +318,22 @@ def stock_config_ui():
         </div>
         <div class="hint">Skip if total pending buy qty OR sell qty is below this (liquidity check)</div>
       </div>
+      <div class="field">
+        <label>Min Upper Circuit %</label>
+        <div class="input-row">
+          <input type="number" id="sip_min_upper_circuit_pct" step="1" min="0" placeholder="20"/>
+          <span>%</span>
+        </div>
+        <div class="hint">Skip if the stock's upper circuit limit is ≤ this value (e.g. 20 = only place order if upper circuit &gt; 20%)</div>
+      </div>
+      <div class="field">
+        <label>Max Entry Gain from Prev Close</label>
+        <div class="input-row">
+          <input type="number" id="sip_max_entry_gain_pct" step="0.1" min="0" placeholder="10"/>
+          <span>%</span>
+        </div>
+        <div class="hint">Skip if limit price ≥ prev day close × (1 + this%). Avoids chasing stocks already up &gt;10%</div>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Buy Order Quantity by LTP Range</div>
@@ -355,7 +373,11 @@ def stock_config_ui():
   </div>
 
   <script>
-    const FIELDS = ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'];
+    const FIELDS = {
+      eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'],
+      sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
+            'min_upper_circuit_pct','max_entry_gain_pct']
+    };
     const API = { eb: '/api/stock-config', sip: '/api/stockinplay-config' };
 
     function switchTab(profile) {
@@ -367,7 +389,7 @@ def stock_config_ui():
     async function load(profile) {
       try {
         const cfg = await (await fetch(API[profile])).json();
-        FIELDS.forEach(f => {
+        FIELDS[profile].forEach(f => {
           const el = document.getElementById(profile+'_'+f);
           if (el) el.value = cfg[f] ?? '';
         });
@@ -380,7 +402,7 @@ def stock_config_ui():
       toast.className = 'toast';
 
       const payload = {};
-      for (const f of FIELDS) {
+      for (const f of FIELDS[profile]) {
         const v = document.getElementById(profile+'_'+f)?.value;
         if (v === '' || v == null) {
           toast.className = 'toast err';
