@@ -145,9 +145,8 @@ def start_ticker(access_token: str):
     ticker.on_connect       = on_connect
     ticker.on_close         = on_close
     ticker.on_error         = on_error
+    _ticker = ticker        # set BEFORE connect so on_close sees correct _ticker if connection fails immediately
     ticker.connect(threaded=True)
-    _ticker = ticker
-    # _ticker_reconnecting stays True until on_connect fires
     return ticker
 
 
