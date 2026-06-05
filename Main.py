@@ -24,6 +24,7 @@ import pandas as pd
 from get_access_token import get_login_url, get_access_token as fetch_access_token, API_KEY
 from ExcelUpload import router as excel_router
 from ControlPanel import router as control_router
+from StockInPlay import router as sip_router, init_sip_table
 from StockConfig import (router as config_router, get_config, qty_for_ltp, init_config_table,
                          get_stockinplay_config, qty_for_ltp_sip, init_stockinplay_config_table)
 from LiveStockManager import (
@@ -601,6 +602,7 @@ async def lifespan(_: FastAPI):
     init_db()
     init_config_table()
     init_stockinplay_config_table()
+    init_sip_table()
     init_live_table()
     restore_subscriptions()   # rebuild _active_subs from DB after restart
     eod_task = asyncio.create_task(_live_eod_cleanup())
@@ -617,6 +619,7 @@ app.include_router(excel_router)
 app.include_router(control_router)
 app.include_router(config_router)
 app.include_router(live_router)
+app.include_router(sip_router)
 
 # Token cache
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
