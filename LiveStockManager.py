@@ -294,94 +294,181 @@ def live_candles_ui():
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:28px 16px}
-    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    .page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
     h1{font-size:1.3rem;color:#fff}
     .meta{font-size:.82rem;color:#6b7280;margin-top:2px}
-    .dot{width:9px;height:9px;border-radius:50%;background:#4b5563;display:inline-block;margin-right:5px}
+    .dot{width:9px;height:9px;border-radius:50%;background:#4b5563;display:inline-block;margin-right:5px;vertical-align:middle}
     .dot.live{background:#22c55e;animation:pulse 1.2s infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-    .controls{display:flex;gap:8px;align-items:center}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     input[type=text]{padding:7px 12px;border:1px solid #374151;border-radius:8px;background:#1e1e2e;color:#cdd6f4;font-size:.85rem;outline:none;width:180px}
-    button{padding:7px 16px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#374151;color:#9ca3af}
-    button:hover{background:#4b5563}
-    .wrap{overflow-x:auto;background:#1e1e2e;border-radius:12px}
-    table{width:100%;border-collapse:collapse;font-size:.85rem}
-    thead th{background:#0f0f1a;color:#6b7280;padding:10px 14px;text-align:right;white-space:nowrap;font-size:.73rem;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0}
-    thead th:first-child,thead th:nth-child(2){text-align:left}
-    tbody td{padding:9px 14px;border-bottom:1px solid #1a1a2e;text-align:right;white-space:nowrap}
-    tbody td:first-child,tbody td:nth-child(2){text-align:left}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#2a2a3e;color:#9ca3af;transition:background .15s}
+    .btn:hover{background:#374151}
+
+    .stock-group{background:#1e1e2e;border-radius:12px;margin-bottom:12px;overflow:hidden;border:1px solid #2a2a3e}
+    .stock-group.sl-breach{border-color:#7f1d1d}
+    .group-header{display:flex;align-items:center;padding:13px 16px;cursor:pointer;user-select:none;gap:12px;transition:background .15s;flex-wrap:wrap}
+    .group-header:hover{background:#252535}
+    .group-header.sl-breach{background:#1f0d0d}
+    .chevron{font-size:.75rem;color:#6b7280;transition:transform .2s;flex-shrink:0;width:12px}
+    .chevron.open{transform:rotate(90deg)}
+    .sym-name{font-size:1rem;font-weight:800;color:#fff;min-width:110px}
+    .sl-hit-tag{font-size:.68rem;font-weight:700;padding:2px 7px;border-radius:999px;margin-left:8px;background:#450a0a;color:#fca5a5;vertical-align:middle}
+    .latest-close{font-size:1rem;font-weight:700;min-width:80px}
+    .bull{color:#22c55e}
+    .bear{color:#ef4444}
+    .header-stats{display:flex;gap:14px;align-items:center;flex:1;flex-wrap:wrap}
+    .stat{font-size:.78rem;color:#6b7280}
+    .stat span{color:#d1d5db}
+    .sl-badge-breach{background:#450a0a;color:#fca5a5;padding:2px 10px;border-radius:999px;font-size:.74rem;font-weight:700;flex-shrink:0}
+    .sl-badge-ok{background:#14532d;color:#86efac;padding:2px 10px;border-radius:999px;font-size:.74rem;font-weight:700;flex-shrink:0}
+    .sl-badge-none{color:#4b5563;font-size:.74rem;flex-shrink:0}
+    .candle-count{font-size:.73rem;color:#6b7280;background:#0f0f1a;padding:3px 10px;border-radius:999px;flex-shrink:0}
+
+    .group-body{display:none;border-top:1px solid #2a2a3e}
+    .group-body.open{display:block}
+    .wrap{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;font-size:.83rem}
+    thead th{background:#161625;color:#5b6374;padding:8px 14px;text-align:right;white-space:nowrap;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
+    thead th:first-child{text-align:left}
+    tbody td{padding:8px 14px;border-bottom:1px solid #1a1a2e;text-align:right;white-space:nowrap}
+    tbody td:first-child{text-align:left;color:#9ca3af}
     tbody tr:last-child td{border-bottom:none}
     tbody tr:hover{background:#262638}
-    .bull{color:#22c55e;font-weight:700}
-    .bear{color:#ef4444;font-weight:700}
-    .sl-hit{background:#450a0a!important}
-    .badge-breach{background:#450a0a;color:#fca5a5;padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700}
-    .badge-ok{background:#14532d;color:#86efac;padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700}
-    .empty{text-align:center;padding:60px;color:#4b5563}
+    .row-sl{background:#1a0808!important}
+    .badge-breach{background:#450a0a;color:#fca5a5;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:700}
+    .badge-ok{background:#14532d;color:#86efac;padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:700}
+    .empty{text-align:center;padding:60px;color:#4b5563;font-size:.9rem}
   </style>
 </head>
 <body>
-  <div class="header">
+  <div class="page-header">
     <div>
       <h1>Live 5-Min Candles</h1>
       <div class="meta"><span class="dot" id="dot"></span><span id="st">Connecting...</span></div>
     </div>
     <div class="controls">
       <input type="text" id="filter" placeholder="Filter symbol..." oninput="render()"/>
-      <button onclick="loadHistory()">Refresh</button>
-      <button onclick="rows=[];render()">Clear</button>
+      <button class="btn" onclick="toggleAll(true)">Expand All</button>
+      <button class="btn" onclick="toggleAll(false)">Collapse All</button>
+      <button class="btn" onclick="loadHistory()">Refresh</button>
+      <button class="btn" onclick="clearData()">Clear</button>
     </div>
   </div>
-  <div class="wrap">
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Symbol</th><th>Open</th><th>High</th><th>Low</th>
-        <th>Close</th><th>Volume</th><th>SL Price</th><th>SL Status</th>
-      </tr></thead>
-      <tbody id="tbody"><tr><td class="empty" colspan="9">Waiting for candles...</td></tr></tbody>
-    </table>
-  </div>
+  <div id="container"><div class="empty">Waiting for candles...</div></div>
   <script>
-    let rows = [];
+    const groups = {}; // symbol → {candles:[], expanded:bool, hasBreached:bool}
     const fmt    = v => v != null ? Number(v).toFixed(2) : '—';
-    const fmtVol = v => v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : (v||'—');
+    const fmtVol = v => !v ? '—' : v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':String(v);
+
+    function candleKey(c) { return (c.candle_date||'')+'|'+(c.candle_time||c.start||''); }
+
+    function addCandle(c) {
+      const sym = c.symbol;
+      if (!groups[sym]) groups[sym] = {candles:[], expanded:true, hasBreached:false};
+      const g = groups[sym];
+      const key = candleKey(c);
+      if (!g.candles.some(x => candleKey(x) === key)) {
+        g.candles.push(c);
+        g.candles.sort((a,b) => candleKey(b).localeCompare(candleKey(a))); // newest first
+      }
+      if (c.sl_breached) g.hasBreached = true;
+    }
+
+    function orderedSymbols() {
+      return Object.keys(groups).sort((a,b) => {
+        const ca = groups[a].candles[0], cb = groups[b].candles[0];
+        return (cb ? candleKey(cb) : '').localeCompare(ca ? candleKey(ca) : '');
+      });
+    }
 
     function render() {
       const q = document.getElementById('filter').value.trim().toUpperCase();
-      const data = q ? rows.filter(r => r.symbol.includes(q)) : rows;
-      if (!data.length) { document.getElementById('tbody').innerHTML='<tr><td class="empty" colspan="9">No candles yet.</td></tr>'; return; }
-      document.getElementById('tbody').innerHTML = data.map(r => {
-        const cls   = r.close > r.open ? 'bull' : r.close < r.open ? 'bear' : '';
-        const badge = r.sl_breached ? '<span class="badge-breach">⚠ BREACHED</span>' : (r.sl_price ? '<span class="badge-ok">Safe</span>' : '—');
-        return `<tr class="${r.sl_breached?'sl-hit':''}">
-          <td>${r.candle_date} ${r.candle_time}</td><td><strong>${r.symbol}</strong></td>
-          <td>${fmt(r.open)}</td><td>${fmt(r.high)}</td><td>${fmt(r.low)}</td>
-          <td class="${cls}">${fmt(r.close)}</td><td>${fmtVol(r.volume)}</td>
-          <td>${r.sl_price?fmt(r.sl_price):'—'}</td><td>${badge}</td>
-        </tr>`;
+      const syms = orderedSymbols().filter(s => !q || s.toUpperCase().includes(q));
+      const container = document.getElementById('container');
+      if (!syms.length) { container.innerHTML='<div class="empty">No candles yet.</div>'; return; }
+
+      container.innerHTML = syms.map(sym => {
+        const g = groups[sym];
+        const latest = g.candles[0];
+        const priceCls = latest.close > latest.open ? 'bull' : latest.close < latest.open ? 'bear' : '';
+        const slBadge = g.hasBreached
+          ? '<span class="sl-badge-breach">⚠ SL Breached</span>'
+          : latest.sl_price
+            ? '<span class="sl-badge-ok">SL ₹'+fmt(latest.sl_price)+'</span>'
+            : '<span class="sl-badge-none">No SL</span>';
+        const hitTag = g.hasBreached ? '<span class="sl-hit-tag">⚠ SL HIT</span>' : '';
+        const latestTime = (latest.candle_date ? latest.candle_date+' ' : '')+(latest.candle_time||latest.start||'');
+        const rows = g.candles.map(r => {
+          const cls = r.close>r.open?'bull':r.close<r.open?'bear':'';
+          const badge = r.sl_breached
+            ? '<span class="badge-breach">⚠ BREACHED</span>'
+            : r.sl_price ? '<span class="badge-ok">Safe</span>' : '—';
+          const t = (r.candle_date ? r.candle_date+' ' : '')+(r.candle_time||r.start||'');
+          return '<tr class="'+(r.sl_breached?'row-sl':'')+'"><td>'+t+'</td><td>'+fmt(r.open)+'</td><td>'+fmt(r.high)+'</td><td>'+fmt(r.low)+'</td><td class="'+cls+'">'+fmt(r.close)+'</td><td>'+fmtVol(r.volume)+'</td><td>'+badge+'</td></tr>';
+        }).join('');
+        const encSym = sym.replace(/&/g,'&amp;');
+        return '<div class="stock-group'+(g.hasBreached?' sl-breach':'')+'" id="grp-'+encSym+'">'+
+          '<div class="group-header'+(g.hasBreached?' sl-breach':'')+'" data-sym="'+encSym+'" onclick="toggle(this.dataset.sym)">'+
+            '<span class="chevron'+(g.expanded?' open':'')+'" id="chv-'+encSym+'">▶</span>'+
+            '<span class="sym-name">'+encSym+hitTag+'</span>'+
+            '<span class="latest-close '+priceCls+'">₹'+fmt(latest.close)+'</span>'+
+            '<div class="header-stats">'+
+              '<span class="stat">O <span>'+fmt(latest.open)+'</span></span>'+
+              '<span class="stat">H <span>'+fmt(latest.high)+'</span></span>'+
+              '<span class="stat">L <span>'+fmt(latest.low)+'</span></span>'+
+              '<span class="stat">Vol <span>'+fmtVol(latest.volume)+'</span></span>'+
+              '<span class="stat">Updated <span>'+latestTime+'</span></span>'+
+            '</div>'+
+            slBadge+
+            '<span class="candle-count">'+g.candles.length+' candle'+(g.candles.length!==1?'s':'')+'</span>'+
+          '</div>'+
+          '<div class="group-body'+(g.expanded?' open':'')+'" id="body-'+encSym+'">'+
+            '<div class="wrap"><table>'+
+              '<thead><tr><th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>SL</th></tr></thead>'+
+              '<tbody>'+rows+'</tbody>'+
+            '</table></div>'+
+          '</div>'+
+        '</div>';
       }).join('');
+    }
+
+    function toggle(sym) {
+      if (!groups[sym]) return;
+      groups[sym].expanded = !groups[sym].expanded;
+      const body = document.getElementById('body-'+sym);
+      const chv  = document.getElementById('chv-'+sym);
+      if (body) body.classList.toggle('open', groups[sym].expanded);
+      if (chv)  chv.classList.toggle('open', groups[sym].expanded);
+    }
+
+    function toggleAll(open) {
+      for (const sym in groups) groups[sym].expanded = open;
+      render();
+    }
+
+    function clearData() {
+      for (const sym in groups) delete groups[sym];
+      render();
     }
 
     async function loadHistory() {
       try {
-        const d = await (await fetch('/api/live-candles')).json();
-        rows = d;
+        const data = await (await fetch('/api/live-candles')).json();
+        for (const c of data) addCandle(c);
         render();
       } catch(e) { console.error('fetch failed', e); }
     }
 
-    // Use wss:// on HTTPS pages to avoid mixed-content browser block
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
-    ws.onopen    = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live — 5-min candles streaming'; };
-    ws.onclose   = () => {
+    ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent='Live — 5-min candles streaming'; };
+    ws.onclose = () => {
       document.getElementById('dot').classList.remove('live');
-      document.getElementById('st').textContent = 'Disconnected — polling every 30s';
-      // Fall back to polling when WebSocket is unavailable
+      document.getElementById('st').textContent='Disconnected — polling every 30s';
       setInterval(loadHistory, 30000);
     };
-    ws.onmessage = e => { rows.unshift(JSON.parse(e.data)); if(rows.length>500) rows.pop(); render(); };
-
+    ws.onmessage = e => { addCandle(JSON.parse(e.data)); render(); };
     loadHistory();
   </script>
 </body>
