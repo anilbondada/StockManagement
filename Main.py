@@ -91,6 +91,19 @@ def _load_token_from_json() -> Optional[str]:
         return None
 
 
+def _sync_orders_from_rest(access_token: str):
+    """Fetch today's orders via REST and upsert into DB — backfills missed ticker events."""
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(access_token)
+        orders = kite.orders()
+        for o in orders:
+            upsert_order_update(o)
+        print(f"[sync] Synced {len(orders)} orders from Kite REST API")
+    except Exception as e:
+        print(f"[sync] Order sync error: {e}")
+
+
 def start_ticker(access_token: str):
     global _ticker, _ticker_reconnecting
     _ticker_reconnecting = True
@@ -125,6 +138,8 @@ def start_ticker(access_token: str):
         _ticker_reconnecting = False
         print("[ticker] Connected to Zerodha order stream.")
         resubscribe_all(ws)
+        import threading
+        threading.Thread(target=_sync_orders_from_rest, args=(access_token,), daemon=True).start()
 
     def on_close(ws, code, reason):
         global _ticker_reconnecting, _ticker_connected
