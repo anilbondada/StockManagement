@@ -157,6 +157,15 @@ def stock_config_ui():
       </div>
       <div class="hint">Stocks with LTP above this are skipped</div>
     </div>
+
+    <div class="field">
+      <label>Min Order Book Qty (Buy &amp; Sell)</label>
+      <div class="input-row">
+        <input type="number" id="min_book_qty" step="1000" min="0" placeholder="100000"/>
+        <span>qty</span>
+      </div>
+      <div class="hint">Skip if total pending buy qty OR sell qty is below this (liquidity check)</div>
+    </div>
   </div>
 
   <!-- Buy Quantity -->
@@ -204,7 +213,7 @@ def stock_config_ui():
   </div>
 
   <script>
-    const FIELDS = ['skip_pct_change','skip_ltp','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'];
+    const FIELDS = ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'];
 
     async function load() {
       const cfg = await (await fetch('/api/stock-config')).json();
