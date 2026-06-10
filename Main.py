@@ -2019,13 +2019,21 @@ async def simulate_send(payload: dict):
 
 @app.get("/simulate", response_class=HTMLResponse)
 def simulate_ui():
-    sample = json.dumps({
+    sample_eb = json.dumps({
         "stocks": "SBIN,RELIANCE,INFY,TATAMOTORS",
         "trigger_prices": "3.75,541.8,2.1,0.2",
         "triggered_at": "2:34 pm",
         "scan_name": "Short term breakouts",
         "scan_url": "short-term-breakouts",
         "alert_name": "Alert for Short term breakouts"
+    }, indent=2)
+    sample_sip = json.dumps({
+        "stocks": "PARAS,NETWEB,KAYNES",
+        "trigger_prices": "950.5,2100.0,3450.0",
+        "triggered_at": "9:20 am",
+        "scan_name": "StockInPlay Fib Retracement",
+        "scan_url": "stockinplay-fib",
+        "alert_name": "SIP Alert"
     }, indent=2)
     return f"""
 <!DOCTYPE html>
@@ -2036,13 +2044,16 @@ def simulate_ui():
   <title>ChartInk Simulator</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 36px 16px; display: flex; flex-direction: column; align-items: center; }}
-    h1 {{ color: #1a1a2e; font-size: 1.4rem; margin-bottom: 6px; }}
-    p {{ color: #6b7280; font-size: 0.85rem; margin-bottom: 24px; }}
+    body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 36px 16px; display: flex; flex-direction: column; align-items: center; gap: 24px; }}
+    h1 {{ color: #1a1a2e; font-size: 1.4rem; margin-bottom: 4px; text-align: center; }}
+    .sub {{ color: #6b7280; font-size: 0.85rem; text-align: center; margin-bottom: 8px; }}
     .card {{ background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 24px; width: 100%; max-width: 560px; }}
+    .card-title {{ font-size: .8rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 2px solid #f1f5f9; }}
+    .eb-title {{ color: #4f46e5; border-color: #e0e7ff; }}
+    .sip-title {{ color: #0891b2; border-color: #cffafe; }}
     label {{ font-size: 0.8rem; font-weight: 600; color: #555; display: block; margin-bottom: 8px; }}
     textarea {{
-      width: 100%; height: 240px; font-family: monospace; font-size: 0.88rem;
+      width: 100%; height: 220px; font-family: monospace; font-size: 0.85rem;
       padding: 14px; border: 1px solid #ddd; border-radius: 8px;
       resize: vertical; outline: none; line-height: 1.6;
       background: #1e1e2e; color: #cdd6f4;
@@ -2051,84 +2062,129 @@ def simulate_ui():
     .actions {{ display: flex; gap: 10px; margin-top: 14px; }}
     button {{
       flex: 1; padding: 11px; border: none; border-radius: 8px;
-      font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: background 0.2s;
+      font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: background 0.2s;
     }}
-    #sendBtn {{ background: #4f46e5; color: #fff; }}
-    #sendBtn:hover {{ background: #4338ca; }}
-    #sendBtn:disabled {{ background: #a5b4fc; cursor: not-allowed; }}
-    #resetBtn {{ background: #f3f4f6; color: #374151; }}
-    #resetBtn:hover {{ background: #e5e7eb; }}
+    .btn-eb      {{ background: #4f46e5; color: #fff; }}
+    .btn-eb:hover {{ background: #4338ca; }}
+    .btn-sip     {{ background: #0891b2; color: #fff; }}
+    .btn-sip:hover{{ background: #0e7490; }}
+    .btn-reset   {{ background: #f3f4f6; color: #374151; flex: 0 0 90px; }}
+    .btn-reset:hover {{ background: #e5e7eb; }}
+    button:disabled {{ opacity: .5; cursor: not-allowed; }}
     .toast {{
       margin-top: 14px; padding: 10px 16px; border-radius: 8px;
-      font-size: 0.88rem; font-weight: 600; display: none;
+      font-size: 0.85rem; font-weight: 600; display: none; white-space: pre-wrap;
     }}
     .toast.ok  {{ background: #d1fae5; color: #065f46; display: block; }}
     .toast.err {{ background: #fee2e2; color: #991b1b; display: block; }}
   </style>
 </head>
 <body>
-  <h1>ChartInk Simulator</h1>
-  <p>Edit the payload and click Send — all clients on <code>/earlybloom</code> will receive it instantly.</p>
+  <div>
+    <h1>ChartInk Simulator</h1>
+    <p class="sub">Send test webhook payloads to EarlyBloom or StockInPlay</p>
+  </div>
+
+  <!-- EarlyBloom card -->
   <div class="card">
+    <div class="card-title eb-title">EarlyBloom — via WebSocket</div>
     <label>Payload JSON</label>
-    <textarea id="payload">{sample}</textarea>
+    <textarea id="eb-payload">{sample_eb}</textarea>
     <div class="actions">
-      <button id="sendBtn" onclick="send()">Send to WebSocket</button>
-      <button id="resetBtn" onclick="reset()">Reset</button>
+      <button class="btn-eb" id="ebSendBtn" onclick="sendEB()">Send to EarlyBloom</button>
+      <button class="btn-reset" onclick="resetEB()">Reset</button>
     </div>
-    <div class="toast" id="toast"></div>
+    <div class="toast" id="eb-toast"></div>
+  </div>
+
+  <!-- StockInPlay card -->
+  <div class="card">
+    <div class="card-title sip-title">StockInPlay — POST /webhook/stockinplay</div>
+    <label>Payload JSON</label>
+    <textarea id="sip-payload">{sample_sip}</textarea>
+    <div class="actions">
+      <button class="btn-sip" id="sipSendBtn" onclick="sendSIP()">Send to StockInPlay</button>
+      <button class="btn-reset" onclick="resetSIP()">Reset</button>
+    </div>
+    <div class="toast" id="sip-toast"></div>
   </div>
 
   <script>
-    const SAMPLE = {json.dumps(sample)};
+    const SAMPLE_EB  = {json.dumps(sample_eb)};
+    const SAMPLE_SIP = {json.dumps(sample_sip)};
 
-    async function send() {{
-      const btn   = document.getElementById('sendBtn');
-      const toast = document.getElementById('toast');
-      const raw   = document.getElementById('payload').value;
+    /* ── EarlyBloom (WebSocket) ── */
+    async function sendEB() {{
+      const btn   = document.getElementById('ebSendBtn');
+      const toast = document.getElementById('eb-toast');
+      const raw   = document.getElementById('eb-payload').value;
       toast.className = 'toast';
-
       let parsed;
       try {{ parsed = JSON.parse(raw); }}
-      catch (e) {{
-        toast.textContent = 'Invalid JSON: ' + e.message;
-        toast.className = 'toast err';
-        return;
-      }}
-
+      catch (e) {{ toast.textContent = 'Invalid JSON: ' + e.message; toast.className = 'toast err'; return; }}
       if (!ws || ws.readyState !== WebSocket.OPEN) {{
         toast.textContent = 'WebSocket not connected. Retrying...';
         toast.className = 'toast err';
         connectWs();
         return;
       }}
-      btn.disabled = true;
-      btn.textContent = 'Sending...';
+      btn.disabled = true; btn.textContent = 'Sending...';
       try {{
         ws.send(JSON.stringify(parsed));
         toast.textContent = 'Sent via WebSocket at ' + new Date().toLocaleTimeString();
         toast.className = 'toast ok';
       }} catch (e) {{
-        toast.textContent = 'Send failed: ' + e.message;
-        toast.className = 'toast err';
+        toast.textContent = 'Send failed: ' + e.message; toast.className = 'toast err';
       }} finally {{
-        btn.disabled = false;
-        btn.textContent = 'Send to WebSocket';
+        btn.disabled = false; btn.textContent = 'Send to EarlyBloom';
       }}
     }}
-
-    function reset() {{
-      document.getElementById('payload').value = SAMPLE;
-      document.getElementById('toast').className = 'toast';
+    function resetEB() {{
+      document.getElementById('eb-payload').value = SAMPLE_EB;
+      document.getElementById('eb-toast').className = 'toast';
     }}
 
     let ws;
     function connectWs() {{
       ws = new WebSocket(`ws://${{location.host}}/ws/earlybloom`);
-      ws.onopen  = () => {{ document.getElementById('toast').className = 'toast'; }};
       ws.onclose = () => setTimeout(connectWs, 2000);
     }}
     connectWs();
+
+    /* ── StockInPlay (REST POST) ── */
+    async function sendSIP() {{
+      const btn   = document.getElementById('sipSendBtn');
+      const toast = document.getElementById('sip-toast');
+      const raw   = document.getElementById('sip-payload').value;
+      toast.className = 'toast';
+      let parsed;
+      try {{ parsed = JSON.parse(raw); }}
+      catch (e) {{ toast.textContent = 'Invalid JSON: ' + e.message; toast.className = 'toast err'; return; }}
+      btn.disabled = true; btn.textContent = 'Sending...';
+      try {{
+        const r    = await fetch('/webhook/stockinplay', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(parsed)
+        }});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+        const started = (data.started || []).join(', ') || 'none';
+        const skipped = (data.skipped || []).map(s => s.symbol + ' (' + s.reason + ')').join(', ') || 'none';
+        toast.textContent = 'Status: ' + (data.status || '?') +
+          '\\nStarted: ' + started +
+          '\\nSkipped: ' + skipped;
+        toast.className = 'toast ' + (data.status === 'ok' ? 'ok' : 'err');
+      }} catch (e) {{
+        toast.textContent = 'Error: ' + e.message; toast.className = 'toast err';
+      }} finally {{
+        btn.disabled = false; btn.textContent = 'Send to StockInPlay';
+      }}
+    }}
+    function resetSIP() {{
+      document.getElementById('sip-payload').value = SAMPLE_SIP;
+      document.getElementById('sip-toast').className = 'toast';
+    }}
   </script>
 </body>
 </html>
