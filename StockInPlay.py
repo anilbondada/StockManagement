@@ -446,27 +446,54 @@ async def webhook_stockinplay(payload: dict):
 
 @router.get("/api/sip/status")
 def sip_status():
-    # Build unified per-stock status across all known sources
-    all_symbols = (set(_sip_last_webhook_stocks)
+    # Pull today's latest flow record per symbol from DB
+    today = _now_ist().date().isoformat()
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT symbol, status, note, alert_time, limit_order_id, sl_buy_order_id, sl_sell_order_id
+            FROM sip_flows
+            WHERE DATE(created_at) = ?
+            ORDER BY symbol, id DESC
+        """, (today,)).fetchall()
+
+    db_by_symbol = {}
+    for symbol, status, note, alert_time, limit_oid, sl_buy_oid, sl_sell_oid in rows:
+        if symbol not in db_by_symbol:   # first row = latest (ORDER BY id DESC)
+            db_by_symbol[symbol] = {
+                "status":          status,
+                "note":            note or "",
+                "alert_time":      alert_time or "",
+                "limit_order_id":  limit_oid,
+                "sl_buy_order_id": sl_buy_oid,
+                "sl_sell_order_id": sl_sell_oid,
+            }
+
+    all_symbols = (set(db_by_symbol.keys())
                    | set(_sip_flows.keys())
                    | _sip_disabled_stocks)
     stocks = []
     for sym in sorted(all_symbols):
+        db  = db_by_symbol.get(sym, {})
         if sym in _sip_flows:
             run_status = _sip_flows[sym].status
         elif sym in _sip_disabled_stocks:
             run_status = "cancelled"
         else:
-            run_status = "idle"
+            run_status = db.get("status", "idle")
+
         stocks.append({
-            "symbol":   sym,
-            "status":   run_status,
-            "disabled": sym in _sip_disabled_stocks,
+            "symbol":           sym,
+            "status":           run_status,
+            "note":             db.get("note", ""),
+            "alert_time":       db.get("alert_time", ""),
+            "limit_order_id":   db.get("limit_order_id"),
+            "sl_buy_order_id":  db.get("sl_buy_order_id"),
+            "sl_sell_order_id": db.get("sl_sell_order_id"),
+            "disabled":         sym in _sip_disabled_stocks,
         })
     return {
-        "paused":  _sip_paused,
-        "stocks":  stocks,
-        # kept for backward compat
+        "paused":          _sip_paused,
+        "stocks":          stocks,
         "active_flows":    [{"symbol": s, "status": f.status} for s, f in _sip_flows.items()],
         "last_webhook":    _sip_last_webhook_stocks,
         "disabled_stocks": sorted(_sip_disabled_stocks),
@@ -626,15 +653,38 @@ def sip_control_ui():
       }
 
       wrap.innerHTML =
-        '<table><thead><tr><th>Symbol</th><th>Run Status</th><th>Action</th></tr></thead><tbody>' +
+        '<table><thead><tr><th>Symbol</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th></tr></thead><tbody>' +
         s.stocks.map(st => {
-          const statusLabel = st.status.replace(/_/g, ' ');
+          const statusKey   = st.disabled ? 'cancelled' : st.status;
+          const statusLabel = statusKey.replace(/_/g, ' ');
+
+          // Alert time — show HH:MM only
+          const alertTime = st.alert_time
+            ? st.alert_time.replace('T',' ').substring(11,16)
+            : '—';
+
+          // Reason / Orders cell
+          let detail = '';
+          if (st.note) {
+            detail = '<span style="color:#9ca3af;font-size:.78rem">' + st.note + '</span>';
+          }
+          if (st.limit_order_id) {
+            const parts = [];
+            parts.push('Limit&nbsp;<code style="font-size:.72rem;color:#93c5fd">' + st.limit_order_id + '</code>');
+            if (st.sl_buy_order_id)  parts.push('SL-BUY&nbsp;<code style="font-size:.72rem;color:#86efac">'  + st.sl_buy_order_id  + '</code>');
+            if (st.sl_sell_order_id) parts.push('SL-SELL&nbsp;<code style="font-size:.72rem;color:#fca5a5">' + st.sl_sell_order_id + '</code>');
+            detail = parts.join('<br>');
+          }
+
           const actionBtn = st.disabled
             ? '<button class="action-btn restore-btn" onclick="restoreStock(\'' + st.symbol + '\')">Restore Run</button>'
             : '<button class="action-btn cancel-btn"  onclick="cancelStockRun(\'' + st.symbol + '\')">Cancel Run</button>';
+
           return '<tr>' +
             '<td><strong>' + st.symbol + '</strong></td>' +
-            '<td><span class="badge s-' + (st.disabled ? 'cancelled' : st.status) + '">' + (st.disabled ? 'cancelled' : statusLabel) + '</span></td>' +
+            '<td style="color:#9ca3af;font-size:.78rem">' + alertTime + '</td>' +
+            '<td><span class="badge s-' + statusKey + '">' + statusLabel + '</span></td>' +
+            '<td style="max-width:220px">' + (detail || '<span style="color:#4b5563">—</span>') + '</td>' +
             '<td>' + actionBtn + '</td>' +
             '</tr>';
         }).join('') +
