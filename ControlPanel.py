@@ -110,9 +110,24 @@ async def control_force_connect():
 
 
 
+def _pause_sip():
+    import StockInPlay as _sip
+    _sip._sip_paused = True
+    for flow in list(_sip._sip_flows.values()):
+        flow.cancel_evt.set()
+    print("[control] SIP strategy paused — all flows cancelled")
+
+
+def _resume_sip():
+    import StockInPlay as _sip
+    _sip._sip_paused = False
+    print("[control] SIP strategy resumed")
+
+
 @router.post("/api/control/pause")
 async def control_pause():
     _main._paused = True
+    _pause_sip()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
@@ -123,6 +138,7 @@ async def control_pause():
 @router.post("/api/control/resume")
 async def control_resume():
     _main._paused = False
+    _resume_sip()
     _start_ticker()
     print("[control] RESUMED — ticker reconnected")
     return {"paused": False}
@@ -131,6 +147,7 @@ async def control_resume():
 @router.post("/api/control/stop")
 async def control_stop():
     _main._paused = True
+    _pause_sip()
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
