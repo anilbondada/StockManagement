@@ -226,7 +226,7 @@ def _run_sip_flow(flow: SIPFlow):
             # ── Condition checks ──────────────────────────────────────────
             min_book_qty       = int(cfg.get("min_book_qty", 100000))
             min_upper_ckt_pct  = float(cfg.get("min_upper_circuit_pct", 20))
-            max_entry_gain_pct = float(cfg.get("max_entry_gain_pct", 10))
+            max_gapup_gain_pct = float(cfg.get("max_gapup_gain_pct", 10))
 
             upper_ckt_pct = ((upper_circuit_limit - prev_day_close) / prev_day_close * 100
                              if prev_day_close else 0)
@@ -258,13 +258,14 @@ def _run_sip_flow(flow: SIPFlow):
             # ── Fibonacci 61.8% ───────────────────────────────────────────
             fib_raw   = day_low + 0.618 * (day_high - day_low)
             fib_level = round(round(fib_raw / 0.05) * 0.05, 2)
-            max_entry_price = round(prev_day_close * (1 + max_entry_gain_pct / 100), 2)
 
-            if fib_level >= max_entry_price:
-                print(f"[sip] {symbol}: skip — fib {fib_level} >= max_entry {max_entry_price} "
-                      f"({max_entry_gain_pct}% above prev_close {prev_day_close})")
+            gapup_gain_pct = ((day_open - prev_day_close) / prev_day_close * 100
+                               if prev_day_close else 0)
+            if gapup_gain_pct > max_gapup_gain_pct:
+                print(f"[sip] {symbol}: skip — gapup {gapup_gain_pct:.1f}% > max {max_gapup_gain_pct}% "
+                      f"(open={day_open} prev_close={prev_day_close})")
                 flow.status = "skipped"
-                _save_flow(flow, note=f"fib {fib_level} >= max_entry {max_entry_price}")
+                _save_flow(flow, note=f"gapup {gapup_gain_pct:.1f}% > max {max_gapup_gain_pct}%")
                 break
 
             qty = qty_for_ltp_sip(ltp, cfg)
