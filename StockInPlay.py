@@ -101,6 +101,17 @@ class SIPFlow:
         self.status      = "waiting"
 
 
+def _tag_webhook_order(order_id, symbol: str, txn_type: str):
+    """Tag a SIP order in order_updates so it's treated as a webhook order."""
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+               VALUES (?,?,?,1,?)
+               ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+            (str(order_id), symbol, txn_type, datetime.now(timezone.utc).isoformat())
+        )
+
+
 def _save_flow(flow: SIPFlow, **cols):
     now = _now_ist().isoformat()
     if flow.db_id is None:
@@ -275,6 +286,7 @@ def _run_sip_flow(flow: SIPFlow):
             flow.status = "limit_placed"
             _save_flow(flow, limit_order_id=str(limit_order_id), fib_level=fib_level,
                        day_high=day_high, day_low=day_low, prev_day_close=prev_day_close)
+            _tag_webhook_order(limit_order_id, symbol, "BUY")
 
             # ── Wait for current candle to close ──────────────────────────
             next_close = _next_candle_close(_now_ist())
@@ -309,6 +321,7 @@ def _run_sip_flow(flow: SIPFlow):
                 )
                 print(f"[sip] {symbol}: SL-BUY order_id={sl_buy_order_id} trigger={sl_trigger}")
                 _save_flow(flow, sl_buy_order_id=str(sl_buy_order_id))
+                _tag_webhook_order(sl_buy_order_id, symbol, "BUY")
 
                 # ── Step 7: SL-SELL at closed candle low − 1 ─────────────
                 fill_candle = _fetch_candle(kite, token, next_close)
@@ -330,6 +343,7 @@ def _run_sip_flow(flow: SIPFlow):
                           f"(candle_low={fill_candle['low']})")
                     flow.status = "sl_placed"
                     _save_flow(flow, sl_sell_order_id=str(sl_sell_order_id))
+                    _tag_webhook_order(sl_sell_order_id, symbol, "SELL")
                 else:
                     print(f"[sip] {symbol}: LIMIT filled but no candle data for SL-SELL")
                     flow.status = "filled_no_sl"
