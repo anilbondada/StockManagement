@@ -148,8 +148,10 @@ def start_ticker(access_token: str):
         # start_ticker sets _ticker=None before closing old ticker, so old on_close skips this.
         if not _ticker_shutdown and ticker is _ticker:
             _ticker_reconnecting = True
-            import threading
-            threading.Thread(target=_reconnect_ticker, args=(access_token,), daemon=True).start()
+            if _main_loop and not _main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    _reconnect_async(access_token), _main_loop
+                )
 
     def on_error(ws, code, reason):
         print(f"[ticker] Error {code}: {reason}")
@@ -164,16 +166,15 @@ def start_ticker(access_token: str):
     return ticker
 
 
-def _reconnect_ticker(prev_token: str, delay: int = 30):
-    """Reload token from file and restart ticker. Backs off if token unchanged."""
+async def _reconnect_async(prev_token: str, delay: int = 30):
+    """Reload token and restart ticker — always runs on the main event loop."""
     global _ticker_reconnecting
-    time.sleep(delay)
+    await asyncio.sleep(delay)
 
     if _ticker_shutdown:
         _ticker_reconnecting = False
         return
 
-    # /callback may have already connected — don't compete with it
     if _ticker and _ticker.is_connected():
         print("[ticker] Already connected externally, skipping reconnect")
         _ticker_reconnecting = False
@@ -186,17 +187,17 @@ def _reconnect_ticker(prev_token: str, delay: int = 30):
         return
 
     if new_token == prev_token:
-        print(f"[ticker] Token unchanged, retrying in 60s...")
-        time.sleep(60)
-        if not (_ticker and _ticker.is_connected()):  # check again after wait
-            _reconnect_ticker(prev_token, delay=0)
+        print("[ticker] Token unchanged, retrying in 60s...")
+        await asyncio.sleep(60)
+        if not (_ticker and _ticker.is_connected()):
+            asyncio.ensure_future(_reconnect_async(prev_token, delay=0))
         else:
             _ticker_reconnecting = False
         return
 
-    print(f"[ticker] Reconnecting with refreshed token...")
+    print("[ticker] Reconnecting with refreshed token...")
     start_ticker(new_token)
-    # _ticker_reconnecting cleared by on_connect, not here
+    # _ticker_reconnecting cleared by on_connect
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -664,7 +665,7 @@ def login():
 
 
 @app.get("/callback")
-def callback(request_token: str):
+async def callback(request_token: str):
     """Zerodha redirects here with request_token after login."""
     global _access_token, _paused
     try:

@@ -4,6 +4,7 @@ Control Panel — Router
 Login, Pause, Resume, Stop controls for the trading system.
 """
 
+import asyncio
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -97,7 +98,8 @@ def _start_ticker():
 
 
 @router.post("/api/control/force-connect")
-def control_force_connect():
+async def control_force_connect():
+    """Reconnect ticker from the main thread."""
     token = _main._load_token_from_json() or _main._access_token
     if not token:
         raise HTTPException(status_code=401, detail="No token available. Login first.")
@@ -106,17 +108,20 @@ def control_force_connect():
     return {"message": "Force connect initiated", "token_loaded": bool(token)}
 
 
+
+
 @router.post("/api/control/pause")
-def control_pause():
+async def control_pause():
     _main._paused = True
-    result = _cancel_pending_webhook_orders()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
     print(f"[control] PAUSED — {result['cancelled']} orders cancelled, ticker disconnected")
     return {"paused": True, "ticker": "disconnected", **result}
 
 
 @router.post("/api/control/resume")
-def control_resume():
+async def control_resume():
     _main._paused = False
     _start_ticker()
     print("[control] RESUMED — ticker reconnected")
@@ -124,9 +129,10 @@ def control_resume():
 
 
 @router.post("/api/control/stop")
-def control_stop():
+async def control_stop():
     _main._paused = True
-    result = _cancel_pending_webhook_orders()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
     try:
         if os.path.exists(TOKEN_FILE):
