@@ -167,7 +167,14 @@ def _run_sip_flow(flow: SIPFlow):
         return
 
     while not flow.cancel_evt.is_set():
-        now     = _now_ist()
+        # Per-stock cancel check — can be triggered from UI independently of cancel_evt
+        if symbol in _sip_disabled_stocks:
+            print(f"[sip] {symbol}: cancelled mid-flow (stock disabled)")
+            flow.status = "cancelled"
+            _save_flow(flow)
+            break
+
+        now      = _now_ist()
         deadline = now.replace(hour=DEADLINE_HOUR, minute=DEADLINE_MIN, second=0, microsecond=0)
 
         if now >= deadline:
@@ -422,11 +429,30 @@ async def webhook_stockinplay(payload: dict):
 
 @router.get("/api/sip/status")
 def sip_status():
+    # Build unified per-stock status across all known sources
+    all_symbols = (set(_sip_last_webhook_stocks)
+                   | set(_sip_flows.keys())
+                   | _sip_disabled_stocks)
+    stocks = []
+    for sym in sorted(all_symbols):
+        if sym in _sip_flows:
+            run_status = _sip_flows[sym].status
+        elif sym in _sip_disabled_stocks:
+            run_status = "cancelled"
+        else:
+            run_status = "idle"
+        stocks.append({
+            "symbol":   sym,
+            "status":   run_status,
+            "disabled": sym in _sip_disabled_stocks,
+        })
     return {
-        "paused":          _sip_paused,
-        "disabled_stocks": sorted(_sip_disabled_stocks),
+        "paused":  _sip_paused,
+        "stocks":  stocks,
+        # kept for backward compat
         "active_flows":    [{"symbol": s, "status": f.status} for s, f in _sip_flows.items()],
         "last_webhook":    _sip_last_webhook_stocks,
+        "disabled_stocks": sorted(_sip_disabled_stocks),
     }
 
 
@@ -490,116 +516,76 @@ def sip_control_ui():
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:28px 16px;min-height:100vh}
-    .page{max-width:700px;margin:0 auto}
+    .page{max-width:720px;margin:0 auto}
     h1{font-size:1.3rem;color:#fff;margin-bottom:4px}
     .sub{font-size:.82rem;color:#6b7280;margin-bottom:24px}
 
-    /* Status bar */
-    .status-bar{background:#1e1e2e;border-radius:12px;padding:16px 20px;margin-bottom:20px;display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+    .status-bar{background:#1e1e2e;border-radius:12px;padding:14px 20px;margin-bottom:20px;display:flex;gap:20px;align-items:center;flex-wrap:wrap}
     .stat-item{font-size:.85rem;color:#9ca3af}
     .stat-item strong{color:#fff}
     .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
     .dot-green{background:#22c55e;animation:pulse 1.2s infinite}
-    .dot-red{background:#ef4444}
     .dot-yellow{background:#f59e0b;animation:pulse 1.2s infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
-    /* Cards */
     .card{background:#1e1e2e;border-radius:12px;padding:20px;margin-bottom:16px;border:1px solid #2a2a3e}
-    .card-title{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#0891b2;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #2a2a3e}
+    .card-title{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#0891b2;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #2a2a3e}
 
-    /* Buttons */
     .btn{padding:9px 20px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .15s}
-    .btn-pause{background:#f59e0b;color:#1a1a1a}
-    .btn-pause:hover{background:#d97706}
-    .btn-resume{background:#22c55e;color:#1a1a1a}
-    .btn-resume:hover{background:#16a34a}
-    .btn-danger{background:#ef4444;color:#fff;padding:5px 12px;font-size:.78rem}
-    .btn-danger:hover{background:#dc2626}
-    .btn-sm{background:#2a2a3e;color:#9ca3af;padding:5px 12px;font-size:.78rem;border-radius:6px;border:none;cursor:pointer}
-    .btn-sm:hover{background:#374151}
-    .btn-cyan{background:#0891b2;color:#fff}
-    .btn-cyan:hover{background:#0e7490}
+    .btn-pause{background:#f59e0b;color:#1a1a1a}.btn-pause:hover{background:#d97706}
+    .btn-resume{background:#22c55e;color:#1a1a1a}.btn-resume:hover{background:#16a34a}
+    .btn-cyan{background:#0891b2;color:#fff}.btn-cyan:hover{background:#0e7490}
 
-    /* Flows table */
     table{width:100%;border-collapse:collapse;font-size:.83rem}
-    thead th{color:#6b7280;padding:6px 10px;text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a3e}
-    tbody td{padding:8px 10px;border-bottom:1px solid #1a1a2e;vertical-align:middle}
+    thead th{color:#6b7280;padding:7px 10px;text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a3e}
+    tbody td{padding:9px 10px;border-bottom:1px solid #1a1a2e;vertical-align:middle}
     tbody tr:last-child td{border-bottom:none}
-    .status-badge{padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
+
+    .badge{padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .s-waiting{background:#1e3a5f;color:#93c5fd}
     .s-limit_placed{background:#14532d;color:#86efac}
     .s-recalibrating{background:#44350a;color:#fde68a}
     .s-sl_placed{background:#14532d;color:#86efac}
-    .s-skipped{background:#1f2937;color:#6b7280}
-    .s-cancelled{background:#1f2937;color:#6b7280}
-    .s-deadline{background:#1f2937;color:#6b7280}
-    .s-error{background:#450a0a;color:#fca5a5}
     .s-filled_no_sl{background:#44350a;color:#fde68a}
+    .s-skipped,.s-deadline,.s-idle{background:#1f2937;color:#6b7280}
+    .s-cancelled{background:#450a0a;color:#fca5a5}
+    .s-error{background:#450a0a;color:#fca5a5}
 
-    /* Disabled stocks pills */
-    .pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-    .pill{background:#2a2a3e;color:#cdd6f4;padding:5px 12px;border-radius:999px;font-size:.82rem;display:flex;align-items:center;gap:8px}
-    .pill button{background:none;border:none;color:#ef4444;cursor:pointer;font-size:.9rem;line-height:1;padding:0}
+    .action-btn{border:none;border-radius:6px;padding:4px 12px;font-size:.75rem;font-weight:700;cursor:pointer;transition:all .15s}
+    .cancel-btn{background:#ef444420;color:#ef4444;border:1px solid #ef444440}
+    .cancel-btn:hover{background:#ef4444;color:#fff}
+    .restore-btn{background:#22c55e20;color:#22c55e;border:1px solid #22c55e40}
+    .restore-btn:hover{background:#22c55e;color:#1a1a1a}
 
-    /* Stock disable input */
-    .input-row{display:flex;gap:8px;margin-top:10px}
+    .input-row{display:flex;gap:8px;margin-top:12px}
     input[type=text]{flex:1;padding:8px 12px;border:1px solid #374151;border-radius:8px;background:#161625;color:#cdd6f4;font-size:.88rem;outline:none}
     input[type=text]:focus{border-color:#0891b2}
 
-    /* Webhook stocks list */
-    .stock-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-    .stock-chip{padding:5px 12px;border-radius:999px;font-size:.82rem;cursor:pointer;border:1px solid #374151;background:#1a1a2e;color:#cdd6f4;transition:all .15s;user-select:none}
-    .stock-chip:hover{background:#2a2a3e}
-    .stock-chip.disabled{background:#450a0a;color:#fca5a5;border-color:#7f1d1d}
-
-    .empty{color:#4b5563;font-size:.85rem;padding:12px 0}
-    .result{margin-top:10px;padding:8px 14px;border-radius:8px;font-size:.83rem;display:none}
-    .result.ok{background:#14532d;color:#86efac;display:block}
-    .result.err{background:#450a0a;color:#fca5a5;display:block}
+    .empty{color:#4b5563;font-size:.85rem;padding:10px 0}
   </style>
 </head>
 <body>
 <div class="page">
   <h1>StockInPlay Control</h1>
-  <p class="sub">Fibonacci 61.8% retracement strategy — manage and monitor active flows</p>
+  <p class="sub">Fibonacci 61.8% retracement strategy</p>
 
-  <!-- Status bar -->
   <div class="status-bar">
     <div class="stat-item"><span class="dot" id="sys-dot"></span>Strategy: <strong id="sys-status">—</strong></div>
-    <div class="stat-item">Active flows: <strong id="flow-count">—</strong></div>
-    <div class="stat-item">Disabled stocks: <strong id="disabled-count">—</strong></div>
+    <div class="stat-item">Active: <strong id="flow-count">—</strong></div>
+    <div class="stat-item">Cancelled: <strong id="cancelled-count">—</strong></div>
     <div style="flex:1"></div>
-    <button class="btn btn-pause"   id="pauseBtn"  onclick="pauseResume(true)">Pause Strategy</button>
-    <button class="btn btn-resume"  id="resumeBtn" onclick="pauseResume(false)" style="display:none">Resume Strategy</button>
+    <button class="btn btn-pause"  id="pauseBtn"  onclick="pauseResume(true)">Pause Strategy</button>
+    <button class="btn btn-resume" id="resumeBtn" onclick="pauseResume(false)" style="display:none">Resume Strategy</button>
   </div>
 
-  <!-- Active flows -->
+  <!-- Per-stock table -->
   <div class="card">
-    <div class="card-title">Active Flows</div>
-    <div id="flows-wrap">
-      <div class="empty">No active flows.</div>
-    </div>
-  </div>
-
-  <!-- Disable specific stocks from last webhook -->
-  <div class="card">
-    <div class="card-title">Last Webhook — Quick Disable</div>
-    <p style="font-size:.8rem;color:#6b7280">Click a stock to toggle disabled for today.</p>
-    <div class="stock-grid" id="webhook-stocks">
-      <div class="empty">No webhook received yet.</div>
-    </div>
-  </div>
-
-  <!-- Disabled stocks -->
-  <div class="card">
-    <div class="card-title">Disabled Stocks Today</div>
+    <div class="card-title">Stock Run Status</div>
+    <div id="stocks-wrap"><div class="empty">No stocks yet — waiting for webhook.</div></div>
     <div class="input-row">
-      <input type="text" id="disable-input" placeholder="Symbol e.g. RELIANCE" onkeydown="if(event.key==='Enter')disableStock()"/>
-      <button class="btn btn-cyan" onclick="disableStock()">Disable</button>
+      <input type="text" id="add-input" placeholder="Add symbol e.g. RELIANCE" onkeydown="if(event.key==='Enter')cancelStock()"/>
+      <button class="btn btn-cyan" onclick="cancelStock()">Cancel Run</button>
     </div>
-    <div class="pills" id="disabled-pills"></div>
-    <div class="result" id="disable-result"></div>
   </div>
 </div>
 
@@ -608,48 +594,34 @@ def sip_control_ui():
     try {
       const s = await (await fetch('/api/sip/status')).json();
 
-      // Status bar
       const paused = s.paused;
-      document.getElementById('sys-dot').className    = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
+      document.getElementById('sys-dot').className      = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
       document.getElementById('sys-status').textContent = paused ? 'PAUSED' : 'Running';
-      document.getElementById('flow-count').textContent = s.active_flows.length;
-      document.getElementById('disabled-count').textContent = s.disabled_stocks.length;
+      document.getElementById('flow-count').textContent    = s.active_flows.length;
+      document.getElementById('cancelled-count').textContent = s.disabled_stocks.length;
       document.getElementById('pauseBtn').style.display  = paused ? 'none' : '';
       document.getElementById('resumeBtn').style.display = paused ? '' : 'none';
 
-      // Active flows table
-      const wrap = document.getElementById('flows-wrap');
-      if (!s.active_flows.length) {
-        wrap.innerHTML = '<div class="empty">No active flows.</div>';
-      } else {
-        wrap.innerHTML = '<table><thead><tr><th>Symbol</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
-          s.active_flows.map(f =>
-            '<tr><td><strong>' + f.symbol + '</strong></td>' +
-            '<td><span class="status-badge s-' + f.status + '">' + f.status.replace(/_/g,' ') + '</span></td>' +
-            '<td><button class="btn-danger" onclick="cancelFlow(\'' + f.symbol + '\')">Cancel</button></td></tr>'
-          ).join('') + '</tbody></table>';
+      const wrap = document.getElementById('stocks-wrap');
+      if (!s.stocks || !s.stocks.length) {
+        wrap.innerHTML = '<div class="empty">No stocks yet — waiting for webhook.</div>';
+        return;
       }
 
-      // Last webhook stocks
-      const wrapWH = document.getElementById('webhook-stocks');
-      if (!s.last_webhook.length) {
-        wrapWH.innerHTML = '<div class="empty">No webhook received yet.</div>';
-      } else {
-        wrapWH.innerHTML = s.last_webhook.map(sym => {
-          const dis = s.disabled_stocks.includes(sym);
-          return '<span class="stock-chip' + (dis ? ' disabled' : '') + '" onclick="toggleStock(\'' + sym + '\',' + !dis + ')">' +
-            sym + (dis ? ' ✕' : '') + '</span>';
-        }).join('');
-      }
-
-      // Disabled pills
-      const pills = document.getElementById('disabled-pills');
-      pills.innerHTML = s.disabled_stocks.length
-        ? s.disabled_stocks.map(sym =>
-            '<div class="pill">' + sym +
-            '<button onclick="enableStock(\'' + sym + '\')" title="Re-enable">✕</button></div>'
-          ).join('')
-        : '<div class="empty" style="margin-top:8px">None disabled.</div>';
+      wrap.innerHTML =
+        '<table><thead><tr><th>Symbol</th><th>Run Status</th><th>Action</th></tr></thead><tbody>' +
+        s.stocks.map(st => {
+          const statusLabel = st.status.replace(/_/g, ' ');
+          const actionBtn = st.disabled
+            ? '<button class="action-btn restore-btn" onclick="restoreStock(\'' + st.symbol + '\')">Restore Run</button>'
+            : '<button class="action-btn cancel-btn"  onclick="cancelStockRun(\'' + st.symbol + '\')">Cancel Run</button>';
+          return '<tr>' +
+            '<td><strong>' + st.symbol + '</strong></td>' +
+            '<td><span class="badge s-' + (st.disabled ? 'cancelled' : st.status) + '">' + (st.disabled ? 'cancelled' : statusLabel) + '</span></td>' +
+            '<td>' + actionBtn + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table>';
 
     } catch(e) {}
   }
@@ -659,33 +631,28 @@ def sip_control_ui():
     refresh();
   }
 
-  async function cancelFlow(symbol) {
-    await fetch('/api/sip/cancel-flow', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol})});
+  async function cancelStockRun(sym) {
+    await fetch('/api/sip/disable-stock', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym})
+    });
     refresh();
   }
 
-  async function disableStock() {
-    const inp = document.getElementById('disable-input');
-    const res = document.getElementById('disable-result');
+  async function restoreStock(sym) {
+    await fetch('/api/sip/enable-stock', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym})
+    });
+    refresh();
+  }
+
+  async function cancelStock() {
+    const inp = document.getElementById('add-input');
     const sym = inp.value.trim().toUpperCase();
     if (!sym) return;
-    const r = await fetch('/api/sip/disable-stock', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol: sym})});
-    const d = await r.json();
-    res.className = d.error ? 'result err' : 'result ok';
-    res.textContent = d.error || (sym + ' disabled for today');
+    await cancelStockRun(sym);
     inp.value = '';
-    refresh();
-  }
-
-  async function enableStock(sym) {
-    await fetch('/api/sip/enable-stock', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol: sym})});
-    refresh();
-  }
-
-  async function toggleStock(sym, disable) {
-    const endpoint = disable ? 'disable-stock' : 'enable-stock';
-    await fetch('/api/sip/' + endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol: sym})});
-    refresh();
   }
 
   refresh();
