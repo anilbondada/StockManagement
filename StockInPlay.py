@@ -324,7 +324,8 @@ def _run_sip_flow(flow: SIPFlow):
                 _tag_webhook_order(sl_buy_order_id, symbol, "BUY")
 
                 # ── Step 7: SL-SELL at closed candle low − 1 ─────────────
-                fill_candle = _fetch_candle(kite, token, next_close)
+                fill_candle      = _fetch_candle(kite, token, next_close)
+                sl_sell_order_id = None
                 if fill_candle:
                     sl_sell_price = round(fill_candle["low"] - 1, 2)
                     sl_sell_order_id = kite.place_order(
@@ -348,7 +349,27 @@ def _run_sip_flow(flow: SIPFlow):
                     print(f"[sip] {symbol}: LIMIT filled but no candle data for SL-SELL")
                     flow.status = "filled_no_sl"
                     _save_flow(flow)
-                break  # flow complete for this symbol
+
+                # ── Step 8: Monitor SL-SELL until executed or cancelled ───
+                if sl_sell_order_id:
+                    while not flow.cancel_evt.wait(timeout=60):
+                        sl_orders  = {str(o["order_id"]): o for o in kite.orders()}
+                        sl_sell_st = sl_orders.get(str(sl_sell_order_id), {}).get("status", "")
+                        if sl_sell_st == "COMPLETE":
+                            print(f"[sip] {symbol}: SL-SELL executed — position exited")
+                            flow.status = "exited"
+                            _save_flow(flow, note="SL-SELL executed")
+                            _sip_disabled_stocks.add(symbol)
+                            break
+                    else:
+                        # cancel_evt fired — cancel any open SL orders
+                        _cancel_order(kite, symbol, sl_buy_order_id)
+                        _cancel_order(kite, symbol, sl_sell_order_id)
+                        flow.status = "cancelled"
+                        _save_flow(flow)
+                        _sip_flows.pop(symbol, None)
+                        return
+                break  # exit outer while loop
 
             else:
                 # ── Step 8: unfilled — cancel and recalibrate ─────────────
