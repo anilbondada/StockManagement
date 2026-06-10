@@ -26,8 +26,6 @@ from fastapi.responses import HTMLResponse
 
 DB_FILE           = "alerts.db"
 IST               = timezone(timedelta(hours=5, minutes=30))
-DEADLINE_HOUR     = 12
-DEADLINE_MIN      = 30
 WEBHOOK_CUTOFF    = 10   # ignore webhooks at or after 10:00 AM
 
 router = APIRouter()
@@ -176,10 +174,12 @@ def _run_sip_flow(flow: SIPFlow):
             break
 
         now      = _now_ist()
-        deadline = now.replace(hour=DEADLINE_HOUR, minute=DEADLINE_MIN, second=0, microsecond=0)
+        _dl_cfg  = get_stockinplay_config().get("deadline_time", "15:00")
+        _dl_h, _dl_m = (int(x) for x in _dl_cfg.split(":"))
+        deadline = now.replace(hour=_dl_h, minute=_dl_m, second=0, microsecond=0)
 
         if not flow.simulate and now >= deadline:
-            print(f"[sip] {symbol}: reached {DEADLINE_HOUR}:{DEADLINE_MIN:02d} deadline")
+            print(f"[sip] {symbol}: reached {_dl_cfg} deadline")
             flow.status = "deadline"
             _save_flow(flow)
             break
@@ -238,14 +238,15 @@ def _run_sip_flow(flow: SIPFlow):
                 _save_flow(flow, note=f"liquidity buy={buy_qty} sell={sell_qty}")
                 break
 
-            if upper_ckt_pct <= min_upper_ckt_pct:
-                print(f"[sip] {symbol}: skip — upper_circuit {upper_ckt_pct:.1f}% <= {min_upper_ckt_pct}%")
+            if upper_ckt_pct < min_upper_ckt_pct:
+                print(f"[sip] {symbol}: skip — upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%")
                 flow.status = "skipped"
                 _save_flow(flow, note=f"upper_circuit {upper_ckt_pct:.1f}%")
                 break
 
             # ── Fibonacci 61.8% ───────────────────────────────────────────
-            fib_level       = round(day_high - 0.618 * (day_high - day_low), 2)
+            fib_raw   = day_low + 0.618 * (day_high - day_low)
+            fib_level = round(round(fib_raw / 0.05) * 0.05, 2)
             max_entry_price = round(prev_day_close * (1 + max_entry_gain_pct / 100), 2)
 
             if fib_level >= max_entry_price:
@@ -343,7 +344,7 @@ def _run_sip_flow(flow: SIPFlow):
                 _save_flow(flow)
 
                 # Check deadline before next attempt
-                if _now_ist() >= deadline:
+                if not flow.simulate and _now_ist() >= deadline:
                     print(f"[sip] {symbol}: deadline reached after cancel")
                     flow.status = "deadline"
                     _save_flow(flow)

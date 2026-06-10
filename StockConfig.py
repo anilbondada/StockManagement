@@ -37,6 +37,7 @@ SIP_DEFAULTS = {
     "qty_1000_plus":         "25",
     "min_upper_circuit_pct": "20",   # skip if upper circuit % <= this
     "max_entry_gain_pct":    "10",   # skip if limit price >= prev_close * (1 + this/100)
+    "deadline_time":         "15:00", # cancel unfilled orders after this IST time (HH:MM)
 }
 
 
@@ -334,6 +335,13 @@ def stock_config_ui():
         </div>
         <div class="hint">Skip if limit price ≥ prev day close × (1 + this%). Avoids chasing stocks already up &gt;10%</div>
       </div>
+      <div class="field">
+        <label>Flow Deadline (IST)</label>
+        <div class="input-row">
+          <input type="text" id="sip_deadline_time" placeholder="15:00" style="max-width:90px"/>
+        </div>
+        <div class="hint">Cancel unfilled limit orders and stop recalibrating after this time (HH:MM, 24h IST)</div>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Buy Order Quantity by LTP Range</div>
@@ -376,7 +384,7 @@ def stock_config_ui():
     const FIELDS = {
       eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
-            'min_upper_circuit_pct','max_entry_gain_pct']
+            'min_upper_circuit_pct','max_entry_gain_pct','deadline_time']
     };
     const API = { eb: '/api/stock-config', sip: '/api/stockinplay-config' };
 
