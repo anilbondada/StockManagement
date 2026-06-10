@@ -261,11 +261,11 @@ def _run_sip_flow(flow: SIPFlow):
 
             gapup_gain_pct = ((day_open - prev_day_close) / prev_day_close * 100
                                if prev_day_close else 0)
-            if gapup_gain_pct > max_gapup_gain_pct:
-                print(f"[sip] {symbol}: skip — gapup {gapup_gain_pct:.1f}% > max {max_gapup_gain_pct}% "
+            if gapup_gain_pct >= max_gapup_gain_pct:
+                print(f"[sip] {symbol}: skip — gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
                       f"(open={day_open} prev_close={prev_day_close})")
                 flow.status = "skipped"
-                _save_flow(flow, note=f"gapup {gapup_gain_pct:.1f}% > max {max_gapup_gain_pct}%")
+                _save_flow(flow, note=f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}%")
                 break
 
             qty = qty_for_ltp_sip(ltp, cfg)
