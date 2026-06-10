@@ -93,10 +93,11 @@ def _secs_until(target: datetime) -> float:
 # ── Flow state ────────────────────────────────────────────────────────────────
 
 class SIPFlow:
-    def __init__(self, symbol: str, alert_id: int, alert_time: datetime):
+    def __init__(self, symbol: str, alert_id: int, alert_time: datetime, simulate: bool = False):
         self.symbol      = symbol
         self.alert_id    = alert_id
         self.alert_time  = alert_time
+        self.simulate    = simulate   # bypasses deadline check when True
         self.cancel_evt  = threading.Event()
         self.db_id: Optional[int] = None
         self.status      = "waiting"
@@ -177,7 +178,7 @@ def _run_sip_flow(flow: SIPFlow):
         now      = _now_ist()
         deadline = now.replace(hour=DEADLINE_HOUR, minute=DEADLINE_MIN, second=0, microsecond=0)
 
-        if now >= deadline:
+        if not flow.simulate and now >= deadline:
             print(f"[sip] {symbol}: reached {DEADLINE_HOUR}:{DEADLINE_MIN:02d} deadline")
             flow.status = "deadline"
             _save_flow(flow)
@@ -415,7 +416,7 @@ async def webhook_stockinplay(payload: dict):
             skipped.append({"symbol": symbol, "reason": "already_active"})
             continue
 
-        flow = SIPFlow(symbol=symbol, alert_id=alert_id, alert_time=ist_now)
+        flow = SIPFlow(symbol=symbol, alert_id=alert_id, alert_time=ist_now, simulate=is_sim)
         _save_flow(flow)
         _sip_flows[symbol] = flow
         threading.Thread(target=_run_sip_flow, args=(flow,),
