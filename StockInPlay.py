@@ -500,6 +500,12 @@ def sip_status():
     }
 
 
+@router.get("/api/sip/table", response_class=HTMLResponse)
+def sip_table():
+    status = sip_status()
+    return _render_stocks_table(status["stocks"])
+
+
 @router.post("/api/sip/pause")
 def sip_pause():
     global _sip_paused
@@ -548,9 +554,53 @@ def sip_cancel_flow(payload: dict):
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
+def _render_stocks_table(stocks: list) -> str:
+    if not stocks:
+        return '<div class="empty">No stocks yet — waiting for webhook.</div>'
+    def esc(s):
+        return str(s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+    rows = []
+    for st in stocks:
+        status_key   = "cancelled" if st["disabled"] else st["status"]
+        status_label = status_key.replace("_", " ")
+        alert_time   = (st.get("alert_time") or "").replace("T"," ")[11:16] or "—"
+        detail = ""
+        if st.get("note"):
+            detail = f'<span style="color:#9ca3af;font-size:.78rem">{esc(st["note"])}</span>'
+        if st.get("limit_order_id"):
+            parts = [f'Limit&nbsp;<code style="font-size:.72rem;color:#93c5fd">{esc(st["limit_order_id"])}</code>']
+            if st.get("sl_buy_order_id"):
+                parts.append(f'SL-BUY&nbsp;<code style="font-size:.72rem;color:#86efac">{esc(st["sl_buy_order_id"])}</code>')
+            if st.get("sl_sell_order_id"):
+                parts.append(f'SL-SELL&nbsp;<code style="font-size:.72rem;color:#fca5a5">{esc(st["sl_sell_order_id"])}</code>')
+            detail = "<br>".join(parts)
+        action_btn = (
+            f'<button class="action-btn restore-btn" onclick="restoreStock(\'{esc(st["symbol"])}\')">Restore Run</button>'
+            if st["disabled"] else
+            f'<button class="action-btn cancel-btn" onclick="cancelStockRun(\'{esc(st["symbol"])}\')">Cancel Run</button>'
+        )
+        detail_cell = detail or '<span style="color:#4b5563">—</span>'
+        rows.append(
+            f'<tr>'
+            f'<td><strong>{esc(st["symbol"])}</strong></td>'
+            f'<td style="color:#9ca3af;font-size:.78rem">{alert_time}</td>'
+            f'<td><span class="badge s-{status_key}">{status_label}</span></td>'
+            f'<td style="max-width:220px">{detail_cell}</td>'
+            f'<td>{action_btn}</td>'
+            f'</tr>'
+        )
+    return (
+        '<table><thead><tr>'
+        '<th>Symbol</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+    )
+
+
 @router.get("/sip-control", response_class=HTMLResponse)
 def sip_control_ui():
-    return """
+    status = sip_status()
+    initial_table = _render_stocks_table(status["stocks"])
+    return ("""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -625,7 +675,7 @@ def sip_control_ui():
   <!-- Per-stock table -->
   <div class="card">
     <div class="card-title">Stock Run Status</div>
-    <div id="stocks-wrap"><div class="empty">No stocks yet — waiting for webhook.</div></div>
+    <div id="stocks-wrap">__STOCKS_TABLE__</div>
     <div class="input-row">
       <input type="text" id="add-input" placeholder="Add symbol e.g. RELIANCE" onkeydown="if(event.key==='Enter')cancelStock()"/>
       <button class="btn btn-cyan" onclick="cancelStock()">Cancel Run</button>
@@ -634,63 +684,28 @@ def sip_control_ui():
 </div>
 
 <script>
+  function esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
   async function refresh() {
     try {
-      const s = await (await fetch('/api/sip/status')).json();
-
+      const [s, html] = await Promise.all([
+        fetch('/api/sip/status').then(r => r.json()),
+        fetch('/api/sip/table').then(r => r.text()),
+      ]);
       const paused = s.paused;
-      document.getElementById('sys-dot').className      = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
-      document.getElementById('sys-status').textContent = paused ? 'PAUSED' : 'Running';
-      document.getElementById('flow-count').textContent    = s.active_flows.length;
-      document.getElementById('cancelled-count').textContent = s.disabled_stocks.length;
+      document.getElementById('sys-dot').className       = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
+      document.getElementById('sys-status').textContent  = paused ? 'PAUSED' : 'Running';
+      document.getElementById('flow-count').textContent  = (s.active_flows||[]).length;
+      document.getElementById('cancelled-count').textContent = (s.disabled_stocks||[]).length;
       document.getElementById('pauseBtn').style.display  = paused ? 'none' : '';
       document.getElementById('resumeBtn').style.display = paused ? '' : 'none';
-
-      const wrap = document.getElementById('stocks-wrap');
-      if (!s.stocks || !s.stocks.length) {
-        wrap.innerHTML = '<div class="empty">No stocks yet — waiting for webhook.</div>';
-        return;
-      }
-
-      wrap.innerHTML =
-        '<table><thead><tr><th>Symbol</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th></tr></thead><tbody>' +
-        s.stocks.map(st => {
-          const statusKey   = st.disabled ? 'cancelled' : st.status;
-          const statusLabel = statusKey.replace(/_/g, ' ');
-
-          // Alert time — show HH:MM only
-          const alertTime = st.alert_time
-            ? st.alert_time.replace('T',' ').substring(11,16)
-            : '—';
-
-          // Reason / Orders cell
-          let detail = '';
-          if (st.note) {
-            detail = '<span style="color:#9ca3af;font-size:.78rem">' + st.note + '</span>';
-          }
-          if (st.limit_order_id) {
-            const parts = [];
-            parts.push('Limit&nbsp;<code style="font-size:.72rem;color:#93c5fd">' + st.limit_order_id + '</code>');
-            if (st.sl_buy_order_id)  parts.push('SL-BUY&nbsp;<code style="font-size:.72rem;color:#86efac">'  + st.sl_buy_order_id  + '</code>');
-            if (st.sl_sell_order_id) parts.push('SL-SELL&nbsp;<code style="font-size:.72rem;color:#fca5a5">' + st.sl_sell_order_id + '</code>');
-            detail = parts.join('<br>');
-          }
-
-          const actionBtn = st.disabled
-            ? '<button class="action-btn restore-btn" onclick="restoreStock(\'' + st.symbol + '\')">Restore Run</button>'
-            : '<button class="action-btn cancel-btn"  onclick="cancelStockRun(\'' + st.symbol + '\')">Cancel Run</button>';
-
-          return '<tr>' +
-            '<td><strong>' + st.symbol + '</strong></td>' +
-            '<td style="color:#9ca3af;font-size:.78rem">' + alertTime + '</td>' +
-            '<td><span class="badge s-' + statusKey + '">' + statusLabel + '</span></td>' +
-            '<td style="max-width:220px">' + (detail || '<span style="color:#4b5563">—</span>') + '</td>' +
-            '<td>' + actionBtn + '</td>' +
-            '</tr>';
-        }).join('') +
-        '</tbody></table>';
-
-    } catch(e) {}
+      document.getElementById('stocks-wrap').innerHTML   = html;
+    } catch(e) {
+      document.getElementById('stocks-wrap').innerHTML =
+        '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
+    }
   }
 
   async function pauseResume(pause) {
@@ -727,4 +742,4 @@ def sip_control_ui():
 </script>
 </body>
 </html>
-"""
+""").replace('__STOCKS_TABLE__', initial_table)
