@@ -289,23 +289,50 @@ def _run_sip_flow(flow: SIPFlow):
                        day_high=day_high, day_low=day_low, prev_day_close=prev_day_close)
             _tag_webhook_order(limit_order_id, symbol, "BUY")
 
-            # ── Wait for current candle to close ──────────────────────────
-            next_close = _next_candle_close(_now_ist())
-            wait       = _secs_until(next_close)
-            print(f"[sip] {symbol}: waiting {wait:.0f}s — fill check at {next_close.strftime('%H:%M')}")
-            if flow.cancel_evt.wait(timeout=wait):
+            # ── Wait candle-by-candle; keep order if day range unchanged ──
+            _order_high  = day_high   # range at time of placing this order
+            _order_low   = day_low
+            _limit_filled = False
+
+            while True:
+                next_close = _next_candle_close(_now_ist())
+                wait       = _secs_until(next_close)
+                print(f"[sip] {symbol}: waiting {wait:.0f}s — fill check at {next_close.strftime('%H:%M')}")
+                if flow.cancel_evt.wait(timeout=wait):
+                    _cancel_order(kite, symbol, limit_order_id)
+                    flow.status = "cancelled"
+                    _save_flow(flow)
+                    _sip_flows.pop(symbol, None)
+                    return
+
+                # Check fill
+                orders       = {str(o["order_id"]): o for o in kite.orders()}
+                limit_status = orders.get(str(limit_order_id), {}).get("status", "")
+
+                if limit_status == "COMPLETE":
+                    _limit_filled = True
+                    break
+
+                # Not filled — check if day range changed
+                new_quote    = kite.quote(f"NSE:{symbol}")
+                new_qdata    = new_quote[f"NSE:{symbol}"]
+                new_day_high = new_qdata["ohlc"]["high"]
+                new_day_low  = new_qdata["ohlc"]["low"]
+
+                if new_day_high == _order_high and new_day_low == _order_low:
+                    print(f"[sip] {symbol}: LIMIT BUY unfilled, range unchanged "
+                          f"(high={_order_high} low={_order_low}) — holding order")
+                    continue  # keep order, wait for next candle
+
+                # Range changed — cancel and recalibrate
+                print(f"[sip] {symbol}: LIMIT BUY unfilled, range changed "
+                      f"(high {_order_high}→{new_day_high} low {_order_low}→{new_day_low}), recalibrating…")
                 _cancel_order(kite, symbol, limit_order_id)
-                _cancel_order(kite, symbol, sl_buy_order_id)
-                flow.status = "cancelled"
+                flow.status = "recalibrating"
                 _save_flow(flow)
-                _sip_flows.pop(symbol, None)
-                return
+                break
 
-            # ── Check if LIMIT BUY filled ─────────────────────────────────
-            orders       = {str(o["order_id"]): o for o in kite.orders()}
-            limit_status = orders.get(str(limit_order_id), {}).get("status", "")
-
-            if limit_status == "COMPLETE":
+            if _limit_filled:
                 # ── Step 6: SL-BUY at day_high+1 (placed after fill) ─────
                 sl_trigger = round(day_high + 1, 2)
                 sl_buy_order_id = kite.place_order(
@@ -373,20 +400,13 @@ def _run_sip_flow(flow: SIPFlow):
                 break  # exit outer while loop
 
             else:
-                # ── Step 8: unfilled — cancel and recalibrate ─────────────
-                print(f"[sip] {symbol}: LIMIT BUY unfilled (status={limit_status}), recalibrating…")
-                _cancel_order(kite, symbol, limit_order_id)
-                flow.status = "recalibrating"
-                _save_flow(flow)
-
-                # Check deadline before next attempt
+                # recalibrate — check deadline then wait one candle before re-entering outer loop
                 if not flow.simulate and _now_ist() >= deadline:
                     print(f"[sip] {symbol}: deadline reached after cancel")
                     flow.status = "deadline"
                     _save_flow(flow)
                     break
 
-                # Wait for next candle close before recalibrating
                 next_close = _next_candle_close(_now_ist())
                 wait       = _secs_until(next_close)
                 print(f"[sip] {symbol}: recalibrate check at {next_close.strftime('%H:%M')} ({wait:.0f}s)")
