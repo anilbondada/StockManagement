@@ -375,11 +375,12 @@ async def webhook_stockinplay(payload: dict):
     import Main as _main
     global _sip_last_webhook_stocks
 
-    ist_now = _now_ist()
+    ist_now   = _now_ist()
+    is_sim    = bool(payload.get("_simulate"))   # bypass time checks when simulating
 
-    if ist_now.hour >= WEBHOOK_CUTOFF:
+    if not is_sim and ist_now.hour >= WEBHOOK_CUTOFF:
         print(f"[sip] webhook ignored — after {WEBHOOK_CUTOFF}:00 AM")
-        return {"status": "ignored", "reason": "after_cutoff"}
+        return {"status": "ignored", "reason": f"after_cutoff ({WEBHOOK_CUTOFF}:00 AM IST)"}
 
     if _sip_paused:
         print("[sip] webhook ignored — strategy paused")

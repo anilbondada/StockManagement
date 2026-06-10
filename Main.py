@@ -2102,6 +2102,12 @@ def simulate_ui():
     <div class="card-title sip-title">StockInPlay — POST /webhook/stockinplay</div>
     <label>Payload JSON</label>
     <textarea id="sip-payload">{sample_sip}</textarea>
+    <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="sip-force" checked style="width:16px;height:16px;cursor:pointer;accent-color:#0891b2"/>
+      <label for="sip-force" style="margin:0;cursor:pointer;color:#6b7280;font-size:.82rem">
+        Bypass time cutoff <span style="color:#9ca3af">(adds <code style="font-size:.78rem">_simulate:true</code> to payload)</span>
+      </label>
+    </div>
     <div class="actions">
       <button class="btn-sip" id="sipSendBtn" onclick="sendSIP()">Send to StockInPlay</button>
       <button class="btn-reset" onclick="resetSIP()">Reset</button>
@@ -2160,6 +2166,13 @@ def simulate_ui():
       let parsed;
       try {{ parsed = JSON.parse(raw); }}
       catch (e) {{ toast.textContent = 'Invalid JSON: ' + e.message; toast.className = 'toast err'; return; }}
+
+      if (document.getElementById('sip-force').checked) {{
+        parsed._simulate = true;
+      }} else {{
+        delete parsed._simulate;
+      }}
+
       btn.disabled = true; btn.textContent = 'Sending...';
       try {{
         const r    = await fetch('/webhook/stockinplay', {{
@@ -2169,12 +2182,18 @@ def simulate_ui():
         }});
         const data = await r.json();
         if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
-        const started = (data.started || []).join(', ') || 'none';
-        const skipped = (data.skipped || []).map(s => s.symbol + ' (' + s.reason + ')').join(', ') || 'none';
-        toast.textContent = 'Status: ' + (data.status || '?') +
-          '\\nStarted: ' + started +
-          '\\nSkipped: ' + skipped;
-        toast.className = 'toast ' + (data.status === 'ok' ? 'ok' : 'err');
+        if (data.status === 'ignored') {{
+          toast.textContent = 'Ignored — reason: ' + (data.reason || '?');
+          toast.className = 'toast err';
+        }} else {{
+          const started = (data.started || []).join(', ') || 'none';
+          const skipped = (data.skipped || []).map(s => s.symbol + ' (' + s.reason + ')').join(', ') || 'none';
+          toast.textContent = 'Status: ' + (data.status || '?') +
+            '\\nAlert ID: ' + (data.alert_id || '?') +
+            '\\nStarted: ' + started +
+            '\\nSkipped: ' + skipped;
+          toast.className = 'toast ' + (data.status === 'ok' ? 'ok' : 'err');
+        }}
       }} catch (e) {{
         toast.textContent = 'Error: ' + e.message; toast.className = 'toast err';
       }} finally {{
