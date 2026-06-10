@@ -177,6 +177,13 @@ def _run_sip_flow(flow: SIPFlow):
         return
 
     while not flow.cancel_evt.is_set():
+        if _main._paused or _sip_paused:
+            print(f"[sip] {symbol}: exiting — system paused (main={_main._paused} sip={_sip_paused})")
+            flow.status = "cancelled"
+            _save_flow(flow)
+            _sip_flows.pop(symbol, None)
+            return
+
         # Per-stock cancel check — can be triggered from UI independently of cancel_evt
         if symbol in _sip_disabled_stocks:
             print(f"[sip] {symbol}: cancelled mid-flow (stock disabled)")
@@ -439,6 +446,10 @@ async def webhook_stockinplay(payload: dict):
     if not is_sim and ist_now.hour >= WEBHOOK_CUTOFF:
         print(f"[sip] webhook ignored — after {WEBHOOK_CUTOFF}:00 AM")
         return {"status": "ignored", "reason": f"after_cutoff ({WEBHOOK_CUTOFF}:00 AM IST)"}
+
+    if _main._paused:
+        print("[sip] webhook ignored — system paused")
+        return {"status": "ignored", "reason": "system_paused"}
 
     if _sip_paused:
         print("[sip] webhook ignored — strategy paused")
