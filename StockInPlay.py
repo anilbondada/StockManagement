@@ -592,9 +592,22 @@ def sip_disable_stock(payload: dict):
 
 @router.post("/api/sip/enable-stock")
 def sip_enable_stock(payload: dict):
+    import Main as _main
+
     symbol = (payload.get("symbol") or "").strip().upper()
     _sip_disabled_stocks.discard(symbol)
-    return {"enabled": symbol, "disabled_stocks": sorted(_sip_disabled_stocks)}
+
+    started = False
+    if symbol and symbol not in _sip_flows and _main._access_token:
+        flow = SIPFlow(symbol=symbol, alert_id=None, alert_time=_now_ist(), simulate=False)
+        _save_flow(flow)
+        _sip_flows[symbol] = flow
+        threading.Thread(target=_run_sip_flow, args=(flow,),
+                         daemon=True, name=f"sip-{symbol}").start()
+        started = True
+        print(f"[sip] {symbol}: flow restarted via enable-stock")
+
+    return {"enabled": symbol, "started": started, "disabled_stocks": sorted(_sip_disabled_stocks)}
 
 
 @router.post("/api/sip/cancel-flow")
