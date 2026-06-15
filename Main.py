@@ -379,6 +379,16 @@ def _fetch_complete_candle(data: dict):
                 print(f"[order-update] {symbol} {order_id}: already processed (candle_high exists), skipping duplicate")
                 return
 
+            # SIP flow places its own SL-BUY/SL-SELL after fill — skip generic auto-SELL
+            with _db() as conn:
+                sip_row = conn.execute(
+                    "SELECT 1 FROM sip_flows WHERE limit_order_id=? OR sl_buy_order_id=? LIMIT 1",
+                    (str(order_id), str(order_id))
+                ).fetchone()
+            if sip_row:
+                print(f"[order-update] {symbol} {order_id}: SIP order — SL handled by SIP flow, skipping")
+                return
+
             is_webhook = row and row[1] == 1
 
             kite = get_kite()
