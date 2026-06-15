@@ -12,8 +12,9 @@ Flow per symbol:
   6. Wait for LIMIT BUY to fill; then place SL-BUY at day_high + 1
   7. After LIMIT BUY fills: wait for active candle to close → SL-SELL at candle_low − 1
   8. If LIMIT BUY unfilled by next candle close:
-       cancel LIMIT BUY, recalibrate Fib, place new LIMIT BUY (repeat steps 5–7)
-  9. Repeat until manual cancel or 12:30 PM IST
+       if day high/low unchanged → keep order, wait for next candle
+       if day high/low changed   → modify order price to new Fib 61.8 (no cancel/replace)
+  9. Repeat until filled, cancelled, or deadline_time reached
 """
 
 import json
@@ -139,6 +140,14 @@ def _cancel_order(kite, symbol: str, order_id):
         print(f"[sip] {symbol}: cancelled order {order_id}")
     except Exception as e:
         print(f"[sip] {symbol}: cancel {order_id} error: {e}")
+
+
+def _modify_order_price(kite, symbol: str, order_id, price: float):
+    try:
+        kite.modify_order(variety=kite.VARIETY_REGULAR, order_id=str(order_id), price=price)
+        print(f"[sip] {symbol}: modified order {order_id} → price={price}")
+    except Exception as e:
+        print(f"[sip] {symbol}: modify {order_id} error: {e}")
 
 
 # ── Historical candle fetch ───────────────────────────────────────────────────
@@ -296,10 +305,9 @@ def _run_sip_flow(flow: SIPFlow):
                        day_high=day_high, day_low=day_low, prev_day_close=prev_day_close)
             _tag_webhook_order(limit_order_id, symbol, "BUY")
 
-            # ── Wait candle-by-candle; keep order if day range unchanged ──
-            _order_high  = day_high   # range at time of placing this order
-            _order_low   = day_low
-            _limit_filled = False
+            # ── Wait candle-by-candle; modify LIMIT price if day range changes ──
+            _order_high = day_high   # range used for the current order's fib level
+            _order_low  = day_low
 
             while True:
                 next_close = _next_candle_close(_now_ist())
@@ -317,8 +325,16 @@ def _run_sip_flow(flow: SIPFlow):
                 limit_status = orders.get(str(limit_order_id), {}).get("status", "")
 
                 if limit_status == "COMPLETE":
-                    _limit_filled = True
                     break
+
+                # Not filled — check deadline before holding/modifying further
+                if not flow.simulate and _now_ist() >= deadline:
+                    print(f"[sip] {symbol}: deadline reached, cancelling LIMIT BUY")
+                    _cancel_order(kite, symbol, limit_order_id)
+                    flow.status = "deadline"
+                    _save_flow(flow)
+                    _sip_flows.pop(symbol, None)
+                    return
 
                 # Not filled — check if day range changed
                 new_quote    = kite.quote(f"NSE:{symbol}")
@@ -331,98 +347,83 @@ def _run_sip_flow(flow: SIPFlow):
                           f"(high={_order_high} low={_order_low}) — holding order")
                     continue  # keep order, wait for next candle
 
-                # Range changed — cancel and recalibrate
-                print(f"[sip] {symbol}: LIMIT BUY unfilled, range changed "
-                      f"(high {_order_high}→{new_day_high} low {_order_low}→{new_day_low}), recalibrating…")
-                _cancel_order(kite, symbol, limit_order_id)
-                flow.status = "recalibrating"
-                _save_flow(flow)
-                break
+                # Range changed — modify the existing order to the new fib level
+                new_fib_raw   = new_day_low + 0.618 * (new_day_high - new_day_low)
+                new_fib_level = round(round(new_fib_raw / 0.05) * 0.05, 2)
+                print(f"[sip] {symbol}: range changed "
+                      f"(high {_order_high}→{new_day_high} low {_order_low}→{new_day_low}), "
+                      f"modifying LIMIT BUY {fib_level}→{new_fib_level}")
+                _modify_order_price(kite, symbol, limit_order_id, new_fib_level)
+                _order_high, _order_low = new_day_high, new_day_low
+                day_high, day_low, fib_level = new_day_high, new_day_low, new_fib_level
+                _save_flow(flow, fib_level=fib_level, day_high=day_high, day_low=day_low)
+                continue  # keep waiting on the (modified) order
 
-            if _limit_filled:
-                # ── Step 6: SL-BUY at day_high+1 (placed after fill) ─────
-                sl_trigger = round(day_high + 1, 2)
-                sl_buy_order_id = kite.place_order(
+            # ── Step 6: SL-BUY at day_high+1 (placed after fill) ─────
+            sl_trigger = round(day_high + 1, 2)
+            sl_buy_order_id = kite.place_order(
+                variety          = kite.VARIETY_REGULAR,
+                exchange         = "NSE",
+                tradingsymbol    = symbol,
+                transaction_type = "BUY",
+                quantity         = qty,
+                product          = "MIS",
+                order_type       = "SL",
+                validity         = "DAY",
+                price            = sl_trigger,
+                trigger_price    = sl_trigger,
+            )
+            print(f"[sip] {symbol}: SL-BUY order_id={sl_buy_order_id} trigger={sl_trigger}")
+            _save_flow(flow, sl_buy_order_id=str(sl_buy_order_id))
+            _tag_webhook_order(sl_buy_order_id, symbol, "BUY")
+
+            # ── Step 7: SL-SELL at closed candle low − 1 ─────────────
+            fill_candle      = _fetch_candle(kite, token, next_close)
+            sl_sell_order_id = None
+            if fill_candle:
+                sl_sell_price = round(fill_candle["low"] - 1, 2)
+                sl_sell_order_id = kite.place_order(
                     variety          = kite.VARIETY_REGULAR,
                     exchange         = "NSE",
                     tradingsymbol    = symbol,
-                    transaction_type = "BUY",
+                    transaction_type = "SELL",
                     quantity         = qty,
                     product          = "MIS",
                     order_type       = "SL",
                     validity         = "DAY",
-                    price            = sl_trigger,
-                    trigger_price    = sl_trigger,
+                    price            = sl_sell_price,
+                    trigger_price    = sl_sell_price,
                 )
-                print(f"[sip] {symbol}: SL-BUY order_id={sl_buy_order_id} trigger={sl_trigger}")
-                _save_flow(flow, sl_buy_order_id=str(sl_buy_order_id))
-                _tag_webhook_order(sl_buy_order_id, symbol, "BUY")
-
-                # ── Step 7: SL-SELL at closed candle low − 1 ─────────────
-                fill_candle      = _fetch_candle(kite, token, next_close)
-                sl_sell_order_id = None
-                if fill_candle:
-                    sl_sell_price = round(fill_candle["low"] - 1, 2)
-                    sl_sell_order_id = kite.place_order(
-                        variety          = kite.VARIETY_REGULAR,
-                        exchange         = "NSE",
-                        tradingsymbol    = symbol,
-                        transaction_type = "SELL",
-                        quantity         = qty,
-                        product          = "MIS",
-                        order_type       = "SL",
-                        validity         = "DAY",
-                        price            = sl_sell_price,
-                        trigger_price    = sl_sell_price,
-                    )
-                    print(f"[sip] {symbol}: SL-SELL order_id={sl_sell_order_id} trigger={sl_sell_price} "
-                          f"(candle_low={fill_candle['low']})")
-                    flow.status = "sl_placed"
-                    _save_flow(flow, sl_sell_order_id=str(sl_sell_order_id))
-                    _tag_webhook_order(sl_sell_order_id, symbol, "SELL")
-                else:
-                    print(f"[sip] {symbol}: LIMIT filled but no candle data for SL-SELL")
-                    flow.status = "filled_no_sl"
-                    _save_flow(flow)
-
-                # ── Step 8: Monitor SL-SELL until executed or cancelled ───
-                if sl_sell_order_id:
-                    while not flow.cancel_evt.wait(timeout=60):
-                        sl_orders  = {str(o["order_id"]): o for o in kite.orders()}
-                        sl_sell_st = sl_orders.get(str(sl_sell_order_id), {}).get("status", "")
-                        if sl_sell_st == "COMPLETE":
-                            print(f"[sip] {symbol}: SL-SELL executed — position exited")
-                            flow.status = "exited"
-                            _save_flow(flow, note="SL-SELL executed")
-                            _sip_disabled_stocks.add(symbol)
-                            break
-                    else:
-                        # cancel_evt fired — cancel any open SL orders
-                        _cancel_order(kite, symbol, sl_buy_order_id)
-                        _cancel_order(kite, symbol, sl_sell_order_id)
-                        flow.status = "cancelled"
-                        _save_flow(flow)
-                        _sip_flows.pop(symbol, None)
-                        return
-                break  # exit outer while loop
-
+                print(f"[sip] {symbol}: SL-SELL order_id={sl_sell_order_id} trigger={sl_sell_price} "
+                      f"(candle_low={fill_candle['low']})")
+                flow.status = "sl_placed"
+                _save_flow(flow, sl_sell_order_id=str(sl_sell_order_id))
+                _tag_webhook_order(sl_sell_order_id, symbol, "SELL")
             else:
-                # recalibrate — check deadline then wait one candle before re-entering outer loop
-                if not flow.simulate and _now_ist() >= deadline:
-                    print(f"[sip] {symbol}: deadline reached after cancel")
-                    flow.status = "deadline"
-                    _save_flow(flow)
-                    break
+                print(f"[sip] {symbol}: LIMIT filled but no candle data for SL-SELL")
+                flow.status = "filled_no_sl"
+                _save_flow(flow)
 
-                next_close = _next_candle_close(_now_ist())
-                wait       = _secs_until(next_close)
-                print(f"[sip] {symbol}: recalibrate check at {next_close.strftime('%H:%M')} ({wait:.0f}s)")
-                if flow.cancel_evt.wait(timeout=wait):
+            # ── Step 8: Monitor SL-SELL until executed or cancelled ───
+            if sl_sell_order_id:
+                while not flow.cancel_evt.wait(timeout=60):
+                    sl_orders  = {str(o["order_id"]): o for o in kite.orders()}
+                    sl_sell_st = sl_orders.get(str(sl_sell_order_id), {}).get("status", "")
+                    if sl_sell_st == "COMPLETE":
+                        print(f"[sip] {symbol}: SL-SELL executed — position exited")
+                        flow.status = "exited"
+                        _save_flow(flow, note="SL-SELL executed")
+                        _sip_disabled_stocks.add(symbol)
+                        break
+                else:
+                    # cancel_evt fired — cancel any open SL orders
+                    _cancel_order(kite, symbol, sl_buy_order_id)
+                    _cancel_order(kite, symbol, sl_sell_order_id)
                     flow.status = "cancelled"
                     _save_flow(flow)
                     _sip_flows.pop(symbol, None)
                     return
-                # loop → re-fetch quote, recalculate Fib, place new LIMIT BUY
+            break  # exit outer while loop
 
         except Exception as e:
             print(f"[sip] {symbol}: ERROR {type(e).__name__}({getattr(e,'code','')}) {e}")
