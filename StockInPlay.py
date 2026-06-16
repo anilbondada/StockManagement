@@ -244,45 +244,41 @@ def _run_sip_flow(flow: SIPFlow):
             min_upper_ckt_pct  = float(cfg.get("min_upper_circuit_pct", 20))
             max_gapup_gain_pct = float(cfg.get("max_gapup_gain_pct", 10))
 
-            upper_ckt_pct = ((upper_circuit_limit - prev_day_close) / prev_day_close * 100
-                             if prev_day_close else 0)
+            upper_ckt_pct  = ((upper_circuit_limit - prev_day_close) / prev_day_close * 100
+                              if prev_day_close else 0)
+            gapup_gain_pct = ((day_open - prev_day_close) / prev_day_close * 100
+                              if prev_day_close else 0)
 
+            skip_reason = None
             if c_close <= day_open:
-                print(f"[sip] {symbol}: skip — c_close {c_close} <= day_open {day_open}")
-                flow.status = "skipped"
-                _save_flow(flow, note=f"c_close {c_close} <= day_open {day_open}")
-                break
+                skip_reason = f"c_close {c_close} <= day_open {day_open}"
+            elif c_close <= prev_day_close:
+                skip_reason = f"c_close {c_close} <= prev_close {prev_day_close}"
+            elif buy_qty < min_book_qty or sell_qty < min_book_qty:
+                skip_reason = f"liquidity buy={buy_qty} sell={sell_qty} need>={min_book_qty}"
+            elif upper_ckt_pct < min_upper_ckt_pct:
+                skip_reason = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%"
+            elif gapup_gain_pct >= max_gapup_gain_pct:
+                skip_reason = (f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
+                               f"(open={day_open} prev_close={prev_day_close})")
 
-            if c_close <= prev_day_close:
-                print(f"[sip] {symbol}: skip — c_close {c_close} <= prev_close {prev_day_close}")
-                flow.status = "skipped"
-                _save_flow(flow, note=f"c_close {c_close} <= prev_close {prev_day_close}")
-                break
-
-            if buy_qty < min_book_qty or sell_qty < min_book_qty:
-                print(f"[sip] {symbol}: skip — liquidity buy={buy_qty} sell={sell_qty} need>={min_book_qty}")
-                flow.status = "skipped"
-                _save_flow(flow, note=f"liquidity buy={buy_qty} sell={sell_qty}")
-                break
-
-            if upper_ckt_pct < min_upper_ckt_pct:
-                print(f"[sip] {symbol}: skip — upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%")
-                flow.status = "skipped"
-                _save_flow(flow, note=f"upper_circuit {upper_ckt_pct:.1f}%")
-                break
+            if skip_reason:
+                print(f"[sip] {symbol}: condition not met — {skip_reason}, retrying next candle")
+                flow.status = "waiting"
+                _save_flow(flow, note=skip_reason)
+                next_close = _next_candle_close(_now_ist())
+                wait       = _secs_until(next_close)
+                print(f"[sip] {symbol}: waiting {wait:.0f}s for next candle at {next_close.strftime('%H:%M')}")
+                if flow.cancel_evt.wait(timeout=wait):
+                    flow.status = "cancelled"
+                    _save_flow(flow)
+                    _sip_flows.pop(symbol, None)
+                    return
+                continue
 
             # ── Fibonacci 61.8% ───────────────────────────────────────────
             fib_raw   = day_low + 0.618 * (day_high - day_low)
             fib_level = round(round(fib_raw / 0.05) * 0.05, 2)
-
-            gapup_gain_pct = ((day_open - prev_day_close) / prev_day_close * 100
-                               if prev_day_close else 0)
-            if gapup_gain_pct >= max_gapup_gain_pct:
-                print(f"[sip] {symbol}: skip — gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
-                      f"(open={day_open} prev_close={prev_day_close})")
-                flow.status = "skipped"
-                _save_flow(flow, note=f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}%")
-                break
 
             qty = qty_for_ltp_sip(ltp, cfg)
 
