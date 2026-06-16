@@ -600,7 +600,7 @@ def save_stock_candles(alert_id: int, symbol: str, date_str: str, candles: list,
         )
 
 
-def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
+def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, skip_time_gate: bool = False):
     global _access_token
     # Try _access_token first, fall back to token.json
     kite = None
@@ -651,11 +651,11 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str):
         except Exception as e:
             print(f"[candle fetch] alert_id={alert_id} {symbol}: ERROR {e}")
 
-    # After all candles saved, place orders only before 10:00 AM IST
+    # After all candles saved, place orders (time-gated to before 10:00 AM IST unless skip_time_gate)
     try:
         from datetime import timezone as tz
         ist_now = datetime.now(tz(timedelta(hours=5, minutes=30)))
-        if ist_now.hour < 10:
+        if skip_time_gate or ist_now.hour < 10:
             with _db() as conn:
                 order_rows = conn.execute("""
                     SELECT symbol, high, pct_change FROM stocks_fetched_info
@@ -1118,7 +1118,54 @@ def eb_pause():
     global _eb_paused
     _eb_paused = True
     print("[eb] EarlyBloom strategy paused")
-    return {"paused": True}
+
+    # Fetch active EB orders (OPEN or TRIGGER_PENDING, today, not SIP)
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT ou.order_id, ou.tradingsymbol
+            FROM order_updates ou
+            LEFT JOIN sip_flows sf ON (
+                ou.order_id = sf.limit_order_id OR
+                ou.order_id = sf.sl_buy_order_id OR
+                ou.order_id = sf.sl_sell_order_id
+            )
+            WHERE ou.is_webhook_order = 1 AND sf.symbol IS NULL
+            AND (ou.is_open = 1 OR ou.is_trigger_pending = 1)
+            AND date(ou.last_updated) = date('now')
+        """).fetchall()
+
+    cancelled = []
+    errors    = []
+    if rows:
+        kite = get_kite()
+        for order_id, symbol in rows:
+            try:
+                kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+                print(f"[eb] paused+cancelled order {order_id} ({symbol})")
+                cancelled.append({"order_id": order_id, "symbol": symbol})
+            except Exception as e:
+                print(f"[eb] cancel failed for {order_id} ({symbol}): {e}")
+                errors.append({"order_id": order_id, "symbol": symbol, "error": str(e)})
+
+        # Save each cancelled symbol to chartink_alerts as 'paused' so they appear in the EB tab
+        if cancelled:
+            now_ts = datetime.now(timezone.utc).isoformat()
+            with _db() as conn:
+                for r in cancelled:
+                    conn.execute(
+                        """INSERT INTO chartink_alerts
+                           (stocks, scan_name, alert_name, received_at, status)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            r["symbol"],
+                            "Cancelled on Pause",
+                            "EarlyBloom",
+                            now_ts,
+                            "paused",
+                        ),
+                    )
+
+    return {"paused": True, "cancelled": cancelled, "errors": errors}
 
 
 @app.post("/api/eb/resume")
@@ -1126,7 +1173,35 @@ def eb_resume():
     global _eb_paused
     _eb_paused = False
     print("[eb] EarlyBloom strategy resumed")
-    return {"paused": False}
+
+    today = str(date.today())
+    with _db() as conn:
+        paused_rows = conn.execute("""
+            SELECT id, stocks FROM chartink_alerts
+            WHERE status = 'paused' AND date(received_at) = date('now')
+        """).fetchall()
+        if paused_rows:
+            conn.execute("""
+                UPDATE chartink_alerts SET status = 'received'
+                WHERE status = 'paused' AND date(received_at) = date('now')
+            """)
+
+    import threading
+    restarted = []
+    for alert_id, stocks_str in paused_rows:
+        symbols = [s.strip() for s in (stocks_str or "").split(",") if s.strip()]
+        if not symbols:
+            continue
+        restarted.extend(symbols)
+        threading.Thread(
+            target=fetch_and_store_candles,
+            args=(alert_id, symbols, today, True),
+            daemon=True,
+            name=f"eb-resume-{alert_id}",
+        ).start()
+        print(f"[eb] resume: restarting alert_id={alert_id} symbols={symbols}")
+
+    return {"paused": False, "restarted": restarted}
 
 
 @app.get("/api/eb/table", response_class=HTMLResponse)
