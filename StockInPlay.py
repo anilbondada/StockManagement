@@ -187,8 +187,8 @@ def _run_sip_flow(flow: SIPFlow):
 
     while not flow.cancel_evt.is_set():
         if _main._paused or _sip_paused:
-            print(f"[sip] {symbol}: exiting — system paused (main={_main._paused} sip={_sip_paused})")
-            flow.status = "cancelled"
+            print(f"[sip] {symbol}: pausing — main={_main._paused} sip={_sip_paused}")
+            flow.status = "paused"
             _save_flow(flow)
             _sip_flows.pop(symbol, None)
             return
@@ -517,9 +517,33 @@ def sip_pause():
 @router.post("/api/sip/resume")
 def sip_resume():
     global _sip_paused
+    import Main as _main
     _sip_paused = False
     print("[sip] strategy resumed")
-    return {"paused": False}
+
+    if not _main._access_token:
+        return {"paused": False, "restarted": []}
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT symbol FROM sip_flows
+            WHERE status = 'paused'
+            AND id IN (SELECT MAX(id) FROM sip_flows GROUP BY symbol)
+        """).fetchall()
+
+    restarted = []
+    for (symbol,) in rows:
+        if symbol in _sip_flows or symbol in _sip_disabled_stocks:
+            continue
+        flow = SIPFlow(symbol=symbol, alert_id=None, alert_time=_now_ist(), simulate=False)
+        _save_flow(flow)
+        _sip_flows[symbol] = flow
+        threading.Thread(target=_run_sip_flow, args=(flow,),
+                         daemon=True, name=f"sip-{symbol}").start()
+        restarted.append(symbol)
+        print(f"[sip] {symbol}: flow restarted on strategy resume")
+
+    return {"paused": False, "restarted": restarted}
 
 
 @router.post("/api/sip/disable-stock")
