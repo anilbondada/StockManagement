@@ -379,14 +379,20 @@ def _fetch_complete_candle(data: dict):
                 print(f"[order-update] {symbol} {order_id}: already processed (candle_high exists), skipping duplicate")
                 return
 
-            # SIP flow places its own SL-BUY/SL-SELL after fill — skip generic auto-SELL
+            # Identify SIP-related orders before sleeping for candle close
             with _db() as conn:
-                sip_row = conn.execute(
-                    "SELECT 1 FROM sip_flows WHERE limit_order_id=? OR sl_buy_order_id=? LIMIT 1",
-                    (str(order_id), str(order_id))
+                sip_limit_row = conn.execute(
+                    "SELECT 1 FROM sip_flows WHERE limit_order_id=? LIMIT 1",
+                    (str(order_id),)
                 ).fetchone()
-            if sip_row:
-                print(f"[order-update] {symbol} {order_id}: SIP order — SL handled by SIP flow, skipping")
+                sip_sl_buy_row = None if sip_limit_row else conn.execute(
+                    "SELECT 1 FROM sip_flows WHERE sl_buy_order_id=? LIMIT 1",
+                    (str(order_id),)
+                ).fetchone()
+
+            # SIP SL-BUY triggered (breakout entry) — no auto-sell needed
+            if sip_sl_buy_row:
+                print(f"[order-update] {symbol} {order_id}: SIP SL-BUY triggered — no auto-sell, skipping")
                 return
 
             is_webhook = row and row[1] == 1
@@ -401,6 +407,12 @@ def _fetch_complete_candle(data: dict):
             candle_min   = (exec_dt.minute // 5) * 5
             candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
             candle_end   = candle_start + _td(minutes=5)
+
+            # If fill lands within the first 30s of a new candle (e.g. 10:00:00 or 10:05:09),
+            # that candle has barely formed — use the next full candle instead
+            if (exec_dt - candle_start).total_seconds() < 30:
+                candle_start = candle_end
+                candle_end   = candle_start + _td(minutes=5)
 
             # Wait until the 5-min candle closes (+10s buffer for data availability)
             now_ist   = datetime.now(_tz(_td(hours=5, minutes=30))).replace(tzinfo=None)
@@ -435,6 +447,58 @@ def _fetch_complete_candle(data: dict):
 
             if _paused:
                 print(f"[sell-order] {symbol}: skipped — system is PAUSED")
+            elif sip_limit_row:
+                # SIP LIMIT BUY filled — place SL-BUY and SL-SELL after candle close
+                import StockInPlay as _sip_mod
+                if _sip_mod._sip_paused:
+                    print(f"[sip-sl] {symbol}: skipped — SIP strategy paused")
+                elif transaction_type == "BUY" and quantity > 0:
+                    sl_buy_trigger = round(c["high"] + 1, 2)
+                    sl_buy_id      = kite.place_order(
+                        variety          = kite.VARIETY_REGULAR,
+                        exchange         = "NSE",
+                        tradingsymbol    = symbol,
+                        transaction_type = "BUY",
+                        quantity         = quantity,
+                        product          = "MIS",
+                        order_type       = "SL",
+                        validity         = "DAY",
+                        price            = sl_buy_trigger,
+                        trigger_price    = sl_buy_trigger,
+                    )
+                    print(f"[sip-sl] {symbol}: SL-BUY order_id={sl_buy_id} trigger={sl_buy_trigger} (candle_high={c['high']})")
+                    sl_sell_trigger = round(c["low"] - 1,   2)
+                    sl_sell_limit   = round(c["low"] - 1.5, 2)
+                    sl_sell_id      = kite.place_order(
+                        variety          = kite.VARIETY_REGULAR,
+                        exchange         = "NSE",
+                        tradingsymbol    = symbol,
+                        transaction_type = "SELL",
+                        quantity         = quantity,
+                        product          = "MIS",
+                        order_type       = "SL",
+                        validity         = "DAY",
+                        price            = sl_sell_limit,
+                        trigger_price    = sl_sell_trigger,
+                    )
+                    print(f"[sip-sl] {symbol}: SL-SELL order_id={sl_sell_id} trigger={sl_sell_trigger} limit={sl_sell_limit} (candle_low={c['low']})")
+                    now_ts = datetime.now(timezone.utc).isoformat()
+                    with _db() as conn:
+                        conn.execute(
+                            "UPDATE sip_flows SET sl_buy_order_id=?, sl_sell_order_id=?, status=? WHERE limit_order_id=?",
+                            (str(sl_buy_id), str(sl_sell_id), "sl_placed", str(order_id))
+                        )
+                        conn.execute(
+                            """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                               VALUES (?,?,?,1,?) ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                            (str(sl_buy_id), symbol, "BUY", now_ts)
+                        )
+                        conn.execute(
+                            """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                               VALUES (?,?,?,1,?) ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                            (str(sl_sell_id), symbol, "SELL", now_ts)
+                        )
+                    subscribe_to_stock(symbol, sl_sell_trigger)
             elif not is_webhook:
                 print(f"[sell-order] {symbol}: skipped — not a webhook order")
             elif transaction_type == "BUY" and quantity > 0:
@@ -838,12 +902,22 @@ def api_order_updates_table():
     with _db() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT order_id, exchange_order_id, tradingsymbol, transaction_type,
-                   product, quantity, price, trigger_price, average_price,
-                   exchange, order_type, is_open, is_trigger_pending, is_complete,
-                   is_rejected, is_cancelled, is_webhook_order, status_message,
-                   candle_high, candle_low, order_timestamp, last_updated
-            FROM order_updates ORDER BY last_updated DESC
+            SELECT ou.order_id, ou.exchange_order_id, ou.tradingsymbol, ou.transaction_type,
+                   ou.product, ou.quantity, ou.price, ou.trigger_price, ou.average_price,
+                   ou.exchange, ou.order_type, ou.is_open, ou.is_trigger_pending, ou.is_complete,
+                   ou.is_rejected, ou.is_cancelled, ou.is_webhook_order, ou.status_message,
+                   ou.candle_high, ou.candle_low, ou.order_timestamp, ou.last_updated,
+                   CASE WHEN sf.symbol IS NOT NULL THEN 'StockInPlay'
+                        WHEN ou.is_webhook_order = 1 THEN 'EarlyBloom'
+                        ELSE NULL
+                   END AS webhook_source
+            FROM order_updates ou
+            LEFT JOIN sip_flows sf ON (
+                ou.order_id = sf.limit_order_id OR
+                ou.order_id = sf.sl_buy_order_id OR
+                ou.order_id = sf.sl_sell_order_id
+            )
+            ORDER BY ou.last_updated DESC
         """).fetchall()
     return [dict(r) for r in rows]
 
@@ -919,8 +993,14 @@ def order_updates_table_ui():
         document.getElementById('wrap').innerHTML='<div class="empty">No order updates found.</div>';
         return;
       }
+      function sourceLabel(r){
+        if(!r.is_webhook_order) return '<span style="color:#9ca3af;font-size:.78rem">—</span>';
+        if(r.webhook_source==='StockInPlay') return '<span class="badge" style="background:#ede9fe;color:#5b21b6">StockInPlay</span>';
+        if(r.webhook_source==='EarlyBloom')  return '<span class="badge" style="background:#ffedd5;color:#9a3412">EarlyBloom</span>';
+        return '<span style="color:#9ca3af;font-size:.78rem">—</span>';
+      }
       let h = `<table><thead><tr>
-        <th>Symbol</th><th>Side</th><th>Webhook</th><th>Qty</th><th>Product</th><th>Order Type</th>
+        <th>Symbol</th><th>Side</th><th>Webhook</th><th>Source</th><th>Qty</th><th>Product</th><th>Order Type</th>
         <th>Price</th><th>Trigger</th><th>Avg Price</th>
         <th>Status</th><th>Candle High</th><th>Candle Low</th>
         <th>Order ID</th><th>Last Updated</th>
@@ -929,6 +1009,7 @@ def order_updates_table_ui():
         <td><strong>${r.tradingsymbol||'—'}</strong></td>
         <td class="${(r.transaction_type||'').toLowerCase()}">${r.transaction_type||'—'}</td>
         <td style="text-align:center">${r.is_webhook_order ? '<span class="badge" style="background:#d1fae5;color:#065f46">✓ Webhook</span>' : '<span style="color:#9ca3af;font-size:.78rem">Manual</span>'}</td>
+        <td style="text-align:center">${sourceLabel(r)}</td>
         <td>${r.quantity||'—'}</td>
         <td>${r.product||'—'}</td>
         <td>${r.order_type||'—'}</td>

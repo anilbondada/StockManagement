@@ -359,70 +359,14 @@ def _run_sip_flow(flow: SIPFlow):
                 _save_flow(flow, fib_level=fib_level, day_high=day_high, day_low=day_low)
                 continue  # keep waiting on the (modified) order
 
-            # ── Step 6: SL-BUY at day_high+1 (placed after fill) ─────
-            sl_trigger = round(day_high + 1, 2)
-            sl_buy_order_id = kite.place_order(
-                variety          = kite.VARIETY_REGULAR,
-                exchange         = "NSE",
-                tradingsymbol    = symbol,
-                transaction_type = "BUY",
-                quantity         = qty,
-                product          = "MIS",
-                order_type       = "SL",
-                validity         = "DAY",
-                price            = sl_trigger,
-                trigger_price    = sl_trigger,
-            )
-            print(f"[sip] {symbol}: SL-BUY order_id={sl_buy_order_id} trigger={sl_trigger}")
-            _save_flow(flow, sl_buy_order_id=str(sl_buy_order_id))
-            _tag_webhook_order(sl_buy_order_id, symbol, "BUY")
-
-            # ── Step 7: SL-SELL at closed candle low − 1 ─────────────
-            fill_candle      = _fetch_candle(kite, token, next_close)
-            sl_sell_order_id = None
-            if fill_candle:
-                sl_sell_price = round(fill_candle["low"] - 1, 2)
-                sl_sell_order_id = kite.place_order(
-                    variety          = kite.VARIETY_REGULAR,
-                    exchange         = "NSE",
-                    tradingsymbol    = symbol,
-                    transaction_type = "SELL",
-                    quantity         = qty,
-                    product          = "MIS",
-                    order_type       = "SL",
-                    validity         = "DAY",
-                    price            = sl_sell_price,
-                    trigger_price    = sl_sell_price,
-                )
-                print(f"[sip] {symbol}: SL-SELL order_id={sl_sell_order_id} trigger={sl_sell_price} "
-                      f"(candle_low={fill_candle['low']})")
-                flow.status = "sl_placed"
-                _save_flow(flow, sl_sell_order_id=str(sl_sell_order_id))
-                _tag_webhook_order(sl_sell_order_id, symbol, "SELL")
-            else:
-                print(f"[sip] {symbol}: LIMIT filled but no candle data for SL-SELL")
-                flow.status = "filled_no_sl"
-                _save_flow(flow)
-
-            # ── Step 8: Monitor SL-SELL until executed or cancelled ───
-            if sl_sell_order_id:
-                while not flow.cancel_evt.wait(timeout=60):
-                    sl_orders  = {str(o["order_id"]): o for o in kite.orders()}
-                    sl_sell_st = sl_orders.get(str(sl_sell_order_id), {}).get("status", "")
-                    if sl_sell_st == "COMPLETE":
-                        print(f"[sip] {symbol}: SL-SELL executed — position exited")
-                        flow.status = "exited"
-                        _save_flow(flow, note="SL-SELL executed")
-                        _sip_disabled_stocks.add(symbol)
-                        break
-                else:
-                    # cancel_evt fired — cancel any open SL orders
-                    _cancel_order(kite, symbol, sl_buy_order_id)
-                    _cancel_order(kite, symbol, sl_sell_order_id)
-                    flow.status = "cancelled"
-                    _save_flow(flow)
-                    _sip_flows.pop(symbol, None)
-                    return
+            # ── Steps 6 & 7: SL-BUY / SL-SELL placement moved to on_order_update ──
+            # Main.py's _fetch_complete_candle places SL-BUY (day_high+1) and
+            # SL-SELL (candle_low−1) after the fill candle closes via KiteTicker.
+            # Step 8 (SL-SELL monitor) also removed — cancel_evt on disable/pause
+            # cancels webhook-tagged SL orders via _cancel_pending_webhook_orders.
+            print(f"[sip] {symbol}: LIMIT BUY filled — SL orders will be placed via order-update listener")
+            flow.status = "filled"
+            _save_flow(flow)
             break  # exit outer while loop
 
         except Exception as e:
