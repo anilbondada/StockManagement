@@ -221,7 +221,8 @@ def init_db():
                 scan_url       TEXT,
                 alert_name     TEXT,
                 raw            TEXT,
-                received_at    TEXT
+                received_at    TEXT,
+                status         TEXT DEFAULT 'received'
             )
         """)
         conn.execute("""
@@ -282,6 +283,10 @@ def init_db():
         ou_cols = {r[1] for r in conn.execute("PRAGMA table_info(order_updates)").fetchall()}
         if "is_webhook_order" not in ou_cols:
             conn.execute("ALTER TABLE order_updates ADD COLUMN is_webhook_order INTEGER DEFAULT 0")
+        # Add status column to chartink_alerts if missing
+        ca_cols = {r[1] for r in conn.execute("PRAGMA table_info(chartink_alerts)").fetchall()}
+        if "status" not in ca_cols:
+            conn.execute("ALTER TABLE chartink_alerts ADD COLUMN status TEXT DEFAULT 'received'")
 
 
 
@@ -537,12 +542,12 @@ def _fetch_complete_candle(data: dict):
     threading.Thread(target=_run, daemon=True).start()
 
 
-def save_alert(data: dict) -> int:
+def save_alert(data: dict, status: str = "received") -> int:
     with _db() as conn:
         cur = conn.execute(
             """INSERT INTO chartink_alerts
-               (stocks, trigger_prices, triggered_at, scan_name, scan_url, alert_name, raw, received_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (stocks, trigger_prices, triggered_at, scan_name, scan_url, alert_name, raw, received_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data.get("stocks"),
                 data.get("trigger_prices"),
@@ -552,6 +557,7 @@ def save_alert(data: dict) -> int:
                 data.get("alert_name"),
                 json.dumps(data),
                 datetime.now(timezone.utc).isoformat(),
+                status,
             ),
         )
         return cur.lastrowid
@@ -1127,7 +1133,7 @@ def eb_resume():
 def eb_table():
     with _db() as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+        order_rows = conn.execute("""
             SELECT ou.order_id, ou.tradingsymbol, ou.transaction_type,
                    ou.trigger_price, ou.average_price, ou.quantity,
                    ou.is_open, ou.is_trigger_pending, ou.is_complete,
@@ -1142,7 +1148,33 @@ def eb_table():
             AND date(ou.last_updated) = date('now')
             ORDER BY ou.last_updated DESC
         """).fetchall()
-    return _render_eb_table([dict(r) for r in rows])
+        paused_rows = conn.execute("""
+            SELECT stocks, scan_name, alert_name, received_at
+            FROM chartink_alerts
+            WHERE status = 'paused' AND date(received_at) = date('now')
+            ORDER BY received_at DESC
+        """).fetchall()
+
+    html = _render_eb_table([dict(r) for r in order_rows])
+
+    if paused_rows:
+        def esc(s): return str(s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        paused_html = '<div style="margin-top:18px;padding-top:14px;border-top:1px solid #2a2a3e">'
+        paused_html += '<div style="font-size:.72rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#f59e0b;margin-bottom:10px">Received While Paused</div>'
+        for r in paused_rows:
+            stocks  = [s.strip() for s in (r["stocks"] or "").split(",") if s.strip()]
+            ts      = (r["received_at"] or "")[:16]
+            pills   = "".join(f'<span style="display:inline-block;background:#44350a;color:#fde68a;padding:2px 10px;border-radius:999px;font-size:.78rem;font-weight:700;margin:2px">{esc(s)}</span>' for s in stocks)
+            paused_html += (
+                f'<div style="margin-bottom:10px">'
+                f'<div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">{esc(r["scan_name"] or r["alert_name"] or "Alert")} &middot; {ts}</div>'
+                f'<div>{pills}</div>'
+                f'</div>'
+            )
+        paused_html += '</div>'
+        html += paused_html
+
+    return html
 
 
 @app.post("/api/eb/cancel-order")
@@ -2195,8 +2227,11 @@ async def earlybloom_webhook(payload: dict):
         print("[webhook] System is PAUSED — alert received but ignored.")
         return {"received": False, "reason": "system_paused"}
     if _eb_paused:
-        print("[webhook] EarlyBloom PAUSED — alert received but ignored.")
-        return {"received": False, "reason": "earlybloom_paused"}
+        loop     = asyncio.get_running_loop()
+        alert_id = await loop.run_in_executor(None, save_alert, payload, "paused")
+        symbols  = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
+        print(f"[webhook] EarlyBloom PAUSED — alert saved (id={alert_id}) but not processed: {symbols}")
+        return {"received": False, "reason": "earlybloom_paused", "alert_id": alert_id, "stocks": symbols}
     loop     = asyncio.get_running_loop()
     alert_id = await loop.run_in_executor(None, save_alert, payload)
     await manager.broadcast(json.dumps(payload))
