@@ -388,7 +388,7 @@ def _fetch_complete_candle(data: dict):
             # Identify SIP-related orders before sleeping for candle close
             with _db() as conn:
                 sip_limit_row = conn.execute(
-                    "SELECT 1 FROM sip_flows WHERE limit_order_id=? LIMIT 1",
+                    "SELECT day_high FROM sip_flows WHERE limit_order_id=? LIMIT 1",
                     (str(order_id),)
                 ).fetchone()
                 sip_sl_buy_row = None if sip_limit_row else conn.execute(
@@ -459,7 +459,8 @@ def _fetch_complete_candle(data: dict):
                 if _sip_mod._sip_paused:
                     print(f"[sip-sl] {symbol}: skipped — SIP strategy paused")
                 elif transaction_type == "BUY" and quantity > 0:
-                    sl_buy_trigger = round(c["high"] + 1, 2)
+                    day_high       = sip_limit_row[0] or c["high"]
+                    sl_buy_trigger = round(day_high + 1, 2)
                     sl_buy_id      = kite.place_order(
                         variety          = kite.VARIETY_REGULAR,
                         exchange         = "NSE",
@@ -472,7 +473,7 @@ def _fetch_complete_candle(data: dict):
                         price            = sl_buy_trigger,
                         trigger_price    = sl_buy_trigger,
                     )
-                    print(f"[sip-sl] {symbol}: SL-BUY order_id={sl_buy_id} trigger={sl_buy_trigger} (candle_high={c['high']})")
+                    print(f"[sip-sl] {symbol}: SL-BUY order_id={sl_buy_id} trigger={sl_buy_trigger} (day_high={day_high})")
                     sl_sell_trigger = round(c["low"] - 1,   2)
                     sl_sell_limit   = round(c["low"] - 1.5, 2)
                     sl_sell_id      = kite.place_order(
