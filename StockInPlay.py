@@ -641,14 +641,22 @@ def sip_control_ui():
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>StockInPlay Control</title>
+  <title>Strategy Control</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:28px 16px;min-height:100vh}
-    .page{max-width:720px;margin:0 auto}
+    .page{max-width:760px;margin:0 auto}
     h1{font-size:1.3rem;color:#fff;margin-bottom:4px}
-    .sub{font-size:.82rem;color:#6b7280;margin-bottom:24px}
+    .sub{font-size:.82rem;color:#6b7280;margin-bottom:20px}
 
+    /* ── Tabs ── */
+    .tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid #2a2a3e;padding-bottom:0}
+    .tab{padding:9px 22px;border:none;border-radius:8px 8px 0 0;font-size:.88rem;font-weight:700;cursor:pointer;background:transparent;color:#6b7280;border-bottom:2px solid transparent;transition:all .15s}
+    .tab.active-sip{color:#0891b2;border-bottom:2px solid #0891b2}
+    .tab.active-eb{color:#f59e0b;border-bottom:2px solid #f59e0b}
+    .tab:hover{color:#cdd6f4}
+
+    /* ── Common layout ── */
     .status-bar{background:#1e1e2e;border-radius:12px;padding:14px 20px;margin-bottom:20px;display:flex;gap:20px;align-items:center;flex-wrap:wrap}
     .stat-item{font-size:.85rem;color:#9ca3af}
     .stat-item strong{color:#fff}
@@ -658,7 +666,8 @@ def sip_control_ui():
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
     .card{background:#1e1e2e;border-radius:12px;padding:20px;margin-bottom:16px;border:1px solid #2a2a3e}
-    .card-title{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#0891b2;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #2a2a3e}
+    .card-title{font-size:.75rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #2a2a3e}
+    .ct-sip{color:#0891b2} .ct-eb{color:#f59e0b}
 
     .btn{padding:9px 20px;border:none;border-radius:8px;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .15s}
     .btn-pause{background:#f59e0b;color:#1a1a1a}.btn-pause:hover{background:#d97706}
@@ -670,15 +679,22 @@ def sip_control_ui():
     tbody td{padding:9px 10px;border-bottom:1px solid #1a1a2e;vertical-align:middle}
     tbody tr:last-child td{border-bottom:none}
 
-    .badge{padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
+    .badge{padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block;margin:1px}
     .s-waiting{background:#1e3a5f;color:#93c5fd}
     .s-limit_placed{background:#14532d;color:#86efac}
-    .s-recalibrating{background:#44350a;color:#fde68a}
+    .s-filled{background:#14532d;color:#86efac}
     .s-sl_placed{background:#14532d;color:#86efac}
     .s-filled_no_sl{background:#44350a;color:#fde68a}
+    .s-paused{background:#44350a;color:#fde68a}
     .s-skipped,.s-deadline,.s-idle{background:#1f2937;color:#6b7280}
     .s-cancelled{background:#450a0a;color:#fca5a5}
     .s-error{background:#450a0a;color:#fca5a5}
+    .b-open{background:#dbeafe;color:#1e40af}
+    .b-tp{background:#fef9c3;color:#854d0e}
+    .b-complete{background:#d1fae5;color:#065f46}
+    .b-rejected{background:#fee2e2;color:#991b1b}
+    .b-cancelled{background:#f3f4f6;color:#374151}
+    .buy{color:#22c55e;font-weight:700} .sell{color:#ef4444;font-weight:700}
 
     .action-btn{border:none;border-radius:6px;padding:4px 12px;font-size:.75rem;font-weight:700;cursor:pointer;transition:all .15s}
     .cancel-btn{background:#ef444420;color:#ef4444;border:1px solid #ef444440}
@@ -691,89 +707,149 @@ def sip_control_ui():
     input[type=text]:focus{border-color:#0891b2}
 
     .empty{color:#4b5563;font-size:.85rem;padding:10px 0}
+    .pane{display:none} .pane.active{display:block}
   </style>
 </head>
 <body>
 <div class="page">
-  <h1>StockInPlay Control</h1>
-  <p class="sub">Fibonacci 61.8% retracement strategy</p>
+  <h1>Strategy Control</h1>
+  <p class="sub">StockInPlay &amp; EarlyBloom strategy management</p>
 
-  <div class="status-bar">
-    <div class="stat-item"><span class="dot" id="sys-dot"></span>Strategy: <strong id="sys-status">—</strong></div>
-    <div class="stat-item">Active: <strong id="flow-count">—</strong></div>
-    <div class="stat-item">Cancelled: <strong id="cancelled-count">—</strong></div>
-    <div style="flex:1"></div>
-    <button class="btn btn-pause"  id="pauseBtn"  onclick="pauseResume(true)">Pause Strategy</button>
-    <button class="btn btn-resume" id="resumeBtn" onclick="pauseResume(false)" style="display:none">Resume Strategy</button>
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active-sip" id="tab-sip" onclick="switchTab('sip')">&#9679; StockInPlay</button>
+    <button class="tab" id="tab-eb"  onclick="switchTab('eb')">&#9679; EarlyBloom</button>
   </div>
 
-  <!-- Per-stock table -->
-  <div class="card">
-    <div class="card-title">Stock Run Status</div>
-    <div id="stocks-wrap">__STOCKS_TABLE__</div>
-    <div class="input-row">
-      <input type="text" id="add-input" placeholder="Add symbol e.g. RELIANCE" onkeydown="if(event.key==='Enter')cancelStock()"/>
-      <button class="btn btn-cyan" onclick="cancelStock()">Cancel Run</button>
+  <!-- ── StockInPlay Pane ── -->
+  <div class="pane active" id="pane-sip">
+    <div class="status-bar">
+      <div class="stat-item"><span class="dot" id="sip-dot"></span>Strategy: <strong id="sip-status">—</strong></div>
+      <div class="stat-item">Active: <strong id="sip-flow-count">—</strong></div>
+      <div class="stat-item">Cancelled: <strong id="sip-cancelled-count">—</strong></div>
+      <div style="flex:1"></div>
+      <button class="btn btn-pause"  id="sip-pauseBtn"  onclick="sipPauseResume(true)">Pause Strategy</button>
+      <button class="btn btn-resume" id="sip-resumeBtn" onclick="sipPauseResume(false)" style="display:none">Resume Strategy</button>
+    </div>
+    <div class="card">
+      <div class="card-title ct-sip">Stock Run Status</div>
+      <div id="sip-stocks-wrap">__STOCKS_TABLE__</div>
+      <div class="input-row">
+        <input type="text" id="sip-add-input" placeholder="Symbol e.g. RELIANCE" onkeydown="if(event.key==='Enter')sipCancelStock()"/>
+        <button class="btn btn-cyan" onclick="sipCancelStock()">Cancel Run</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EarlyBloom Pane ── -->
+  <div class="pane" id="pane-eb">
+    <div class="status-bar">
+      <div class="stat-item"><span class="dot" id="eb-dot"></span>Strategy: <strong id="eb-status">—</strong></div>
+      <div style="flex:1"></div>
+      <button class="btn btn-pause"  id="eb-pauseBtn"  onclick="ebPauseResume(true)">Pause Strategy</button>
+      <button class="btn btn-resume" id="eb-resumeBtn" onclick="ebPauseResume(false)" style="display:none">Resume Strategy</button>
+    </div>
+    <div class="card">
+      <div class="card-title ct-eb">Today's EarlyBloom Orders</div>
+      <div id="eb-orders-wrap"><div class="empty">Loading...</div></div>
     </div>
   </div>
 </div>
 
 <script>
-  function esc(s) {
-    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  let activeTab = 'sip';
+  function switchTab(t) {
+    activeTab = t;
+    document.getElementById('pane-sip').classList.toggle('active', t==='sip');
+    document.getElementById('pane-eb').classList.toggle('active',  t==='eb');
+    document.getElementById('tab-sip').className = 'tab' + (t==='sip' ? ' active-sip' : '');
+    document.getElementById('tab-eb').className  = 'tab' + (t==='eb'  ? ' active-eb'  : '');
+    if(t==='eb') refreshEB();
   }
 
-  async function refresh() {
+  /* ── StockInPlay ── */
+  async function refreshSIP() {
     try {
       const [s, html] = await Promise.all([
         fetch('/api/sip/status').then(r => r.json()),
         fetch('/api/sip/table').then(r => r.text()),
       ]);
       const paused = s.paused;
-      document.getElementById('sys-dot').className       = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
-      document.getElementById('sys-status').textContent  = paused ? 'PAUSED' : 'Running';
-      document.getElementById('flow-count').textContent  = (s.active_flows||[]).length;
-      document.getElementById('cancelled-count').textContent = (s.disabled_stocks||[]).length;
-      document.getElementById('pauseBtn').style.display  = paused ? 'none' : '';
-      document.getElementById('resumeBtn').style.display = paused ? '' : 'none';
-      document.getElementById('stocks-wrap').innerHTML   = html;
+      document.getElementById('sip-dot').className              = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
+      document.getElementById('sip-status').textContent         = paused ? 'PAUSED' : 'Running';
+      document.getElementById('sip-flow-count').textContent     = (s.active_flows||[]).length;
+      document.getElementById('sip-cancelled-count').textContent= (s.disabled_stocks||[]).length;
+      document.getElementById('sip-pauseBtn').style.display     = paused ? 'none' : '';
+      document.getElementById('sip-resumeBtn').style.display    = paused ? '' : 'none';
+      document.getElementById('sip-stocks-wrap').innerHTML      = html;
     } catch(e) {
-      document.getElementById('stocks-wrap').innerHTML =
+      document.getElementById('sip-stocks-wrap').innerHTML =
         '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
     }
   }
 
-  async function pauseResume(pause) {
+  async function sipPauseResume(pause) {
     await fetch('/api/sip/' + (pause ? 'pause' : 'resume'), {method:'POST'});
-    refresh();
+    refreshSIP();
   }
-
   async function cancelStockRun(sym) {
-    await fetch('/api/sip/disable-stock', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({symbol: sym})
-    });
-    refresh();
+    await fetch('/api/sip/disable-stock', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({symbol:sym})});
+    refreshSIP();
   }
-
   async function restoreStock(sym) {
-    await fetch('/api/sip/enable-stock', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({symbol: sym})
-    });
-    refresh();
+    await fetch('/api/sip/enable-stock', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({symbol:sym})});
+    refreshSIP();
   }
-
-  async function cancelStock() {
-    const inp = document.getElementById('add-input');
+  async function sipCancelStock() {
+    const inp = document.getElementById('sip-add-input');
     const sym = inp.value.trim().toUpperCase();
-    if (!sym) return;
+    if(!sym) return;
     await cancelStockRun(sym);
     inp.value = '';
   }
 
-  refresh();
-  setInterval(refresh, 5000);
+  /* ── EarlyBloom ── */
+  async function refreshEB() {
+    try {
+      const [s, html] = await Promise.all([
+        fetch('/api/eb/status').then(r => r.json()),
+        fetch('/api/eb/table').then(r => r.text()),
+      ]);
+      const paused = s.paused;
+      document.getElementById('eb-dot').className           = 'dot ' + (paused ? 'dot-yellow' : 'dot-green');
+      document.getElementById('eb-status').textContent      = paused ? 'PAUSED' : 'Running';
+      document.getElementById('eb-pauseBtn').style.display  = paused ? 'none' : '';
+      document.getElementById('eb-resumeBtn').style.display = paused ? '' : 'none';
+      document.getElementById('eb-orders-wrap').innerHTML   = html;
+    } catch(e) {
+      document.getElementById('eb-orders-wrap').innerHTML =
+        '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
+    }
+  }
+
+  async function ebPauseResume(pause) {
+    await fetch('/api/eb/' + (pause ? 'pause' : 'resume'), {method:'POST'});
+    refreshEB();
+  }
+
+  async function cancelEBOrder(orderId) {
+    const res = await fetch('/api/eb/cancel-order', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({order_id: orderId})
+    });
+    const data = await res.json();
+    if(data.error) alert('Cancel failed: ' + data.error);
+    refreshEB();
+  }
+
+  /* ── Init & polling ── */
+  refreshSIP();
+  setInterval(() => {
+    refreshSIP();
+    if(activeTab === 'eb') refreshEB();
+  }, 5000);
 </script>
 </body>
 </html>

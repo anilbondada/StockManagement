@@ -82,6 +82,7 @@ _ticker_shutdown    = False
 
 _ticker_reconnecting = False
 _paused             = False
+_eb_paused          = False
 
 
 def _load_token_from_json() -> Optional[str]:
@@ -499,6 +500,8 @@ def _fetch_complete_candle(data: dict):
                             (str(sl_sell_id), symbol, "SELL", now_ts)
                         )
                     subscribe_to_stock(symbol, sl_sell_trigger)
+            elif _eb_paused:
+                print(f"[sell-order] {symbol}: skipped — EarlyBloom strategy paused")
             elif not is_webhook:
                 print(f"[sell-order] {symbol}: skipped — not a webhook order")
             elif transaction_type == "BUY" and quantity > 0:
@@ -1053,6 +1056,107 @@ def order_updates_table_ui():
 </body>
 </html>
 """
+
+
+def _render_eb_table(rows: list) -> str:
+    if not rows:
+        return '<div class="empty">No EarlyBloom orders today.</div>'
+    def esc(s):
+        return str(s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+    html_rows = []
+    for r in rows:
+        txn     = r["transaction_type"] or "—"
+        txn_cls = "buy" if txn == "BUY" else "sell"
+        badges  = ""
+        if r["is_open"]:            badges += '<span class="badge b-open">OPEN</span>'
+        if r["is_trigger_pending"]: badges += '<span class="badge b-tp">TRIG PENDING</span>'
+        if r["is_complete"]:        badges += '<span class="badge b-complete">COMPLETE</span>'
+        if r["is_rejected"]:        badges += '<span class="badge b-rejected">REJECTED</span>'
+        if r["is_cancelled"]:       badges += '<span class="badge b-cancelled">CANCELLED</span>'
+        if not badges:              badges  = "—"
+        trigger = f"&#x20b9;{r['trigger_price']:.2f}" if r.get("trigger_price") else "—"
+        avg     = f"&#x20b9;{r['average_price']:.2f}" if r.get("average_price") else "—"
+        ts      = (r.get("order_timestamp") or "")[:16] or "—"
+        can_cancel = r["is_open"] or r["is_trigger_pending"]
+        action = (
+            f'<button class="action-btn cancel-btn" onclick="cancelEBOrder(\'{esc(r["order_id"])}\')">Cancel</button>'
+            if can_cancel else '<span style="color:#4b5563">—</span>'
+        )
+        html_rows.append(
+            f'<tr>'
+            f'<td><strong>{esc(r["tradingsymbol"])}</strong></td>'
+            f'<td class="{txn_cls}">{txn}</td>'
+            f'<td>{badges}</td>'
+            f'<td>{trigger}</td>'
+            f'<td>{avg}</td>'
+            f'<td style="color:#9ca3af;font-size:.78rem">{ts}</td>'
+            f'<td style="font-size:.72rem;color:#6b7280">{esc(r["order_id"])}</td>'
+            f'<td>{action}</td>'
+            f'</tr>'
+        )
+    return (
+        '<table><thead><tr>'
+        '<th>Symbol</th><th>Side</th><th>Status</th>'
+        '<th>Trigger</th><th>Avg Price</th><th>Time</th><th>Order ID</th><th>Action</th>'
+        '</tr></thead><tbody>' + "".join(html_rows) + '</tbody></table>'
+    )
+
+
+@app.get("/api/eb/status")
+def eb_status():
+    return {"paused": _eb_paused}
+
+
+@app.post("/api/eb/pause")
+def eb_pause():
+    global _eb_paused
+    _eb_paused = True
+    print("[eb] EarlyBloom strategy paused")
+    return {"paused": True}
+
+
+@app.post("/api/eb/resume")
+def eb_resume():
+    global _eb_paused
+    _eb_paused = False
+    print("[eb] EarlyBloom strategy resumed")
+    return {"paused": False}
+
+
+@app.get("/api/eb/table", response_class=HTMLResponse)
+def eb_table():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT ou.order_id, ou.tradingsymbol, ou.transaction_type,
+                   ou.trigger_price, ou.average_price, ou.quantity,
+                   ou.is_open, ou.is_trigger_pending, ou.is_complete,
+                   ou.is_cancelled, ou.is_rejected, ou.order_timestamp
+            FROM order_updates ou
+            LEFT JOIN sip_flows sf ON (
+                ou.order_id = sf.limit_order_id OR
+                ou.order_id = sf.sl_buy_order_id OR
+                ou.order_id = sf.sl_sell_order_id
+            )
+            WHERE ou.is_webhook_order = 1 AND sf.symbol IS NULL
+            AND date(ou.last_updated) = date('now')
+            ORDER BY ou.last_updated DESC
+        """).fetchall()
+    return _render_eb_table([dict(r) for r in rows])
+
+
+@app.post("/api/eb/cancel-order")
+def eb_cancel_order(payload: dict):
+    order_id = (payload.get("order_id") or "").strip()
+    if not order_id:
+        return {"error": "order_id required"}
+    try:
+        kite = get_kite()
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+        print(f"[eb] cancelled order {order_id}")
+        return {"cancelled": order_id}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/chartink-alerts")
@@ -2089,7 +2193,10 @@ async def earlybloom_webhook(payload: dict):
     """ChartInk posts alerts here. Saves to DB, fetches candles, broadcasts to listeners."""
     if _paused:
         print("[webhook] System is PAUSED — alert received but ignored.")
-        return {"received": False, "reason": "System is paused"}
+        return {"received": False, "reason": "system_paused"}
+    if _eb_paused:
+        print("[webhook] EarlyBloom PAUSED — alert received but ignored.")
+        return {"received": False, "reason": "earlybloom_paused"}
     loop     = asyncio.get_running_loop()
     alert_id = await loop.run_in_executor(None, save_alert, payload)
     await manager.broadcast(json.dumps(payload))
