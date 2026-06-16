@@ -249,6 +249,22 @@ def _run_sip_flow(flow: SIPFlow):
             gapup_gain_pct = ((day_open - prev_day_close) / prev_day_close * 100
                               if prev_day_close else 0)
 
+            # Static conditions — fixed for the day, no point retrying
+            if upper_ckt_pct < min_upper_ckt_pct:
+                note = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%"
+                print(f"[sip] {symbol}: skip (permanent) — {note}")
+                flow.status = "skipped"
+                _save_flow(flow, note=note)
+                break
+            if gapup_gain_pct >= max_gapup_gain_pct:
+                note = (f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
+                        f"(open={day_open} prev_close={prev_day_close})")
+                print(f"[sip] {symbol}: skip (permanent) — {note}")
+                flow.status = "skipped"
+                _save_flow(flow, note=note)
+                break
+
+            # Dynamic conditions — can change each candle, retry on next close
             skip_reason = None
             if c_close <= day_open:
                 skip_reason = f"c_close {c_close} <= day_open {day_open}"
@@ -256,11 +272,6 @@ def _run_sip_flow(flow: SIPFlow):
                 skip_reason = f"c_close {c_close} <= prev_close {prev_day_close}"
             elif buy_qty < min_book_qty or sell_qty < min_book_qty:
                 skip_reason = f"liquidity buy={buy_qty} sell={sell_qty} need>={min_book_qty}"
-            elif upper_ckt_pct < min_upper_ckt_pct:
-                skip_reason = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%"
-            elif gapup_gain_pct >= max_gapup_gain_pct:
-                skip_reason = (f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
-                               f"(open={day_open} prev_close={prev_day_close})")
 
             if skip_reason:
                 print(f"[sip] {symbol}: condition not met — {skip_reason}, retrying next candle")
