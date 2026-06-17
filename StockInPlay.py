@@ -515,8 +515,42 @@ def sip_table():
 def sip_pause():
     global _sip_paused
     _sip_paused = True
+
+    # Cancel in-memory flows (threads still running)
     for flow in list(_sip_flows.values()):
         flow.cancel_evt.set()
+
+    # Cancel orphaned LIMIT BUY orders for flows lost in a service restart
+    # (they exist in DB with active status but no thread in _sip_flows)
+    import Main as _main
+    today = _now_ist().date().isoformat()
+    with _db() as conn:
+        orphans = conn.execute("""
+            SELECT symbol, limit_order_id FROM sip_flows
+            WHERE status IN ('limit_placed', 'waiting')
+            AND DATE(created_at) = ?
+            AND id IN (SELECT MAX(id) FROM sip_flows GROUP BY symbol)
+        """, (today,)).fetchall()
+
+    for symbol, limit_order_id in orphans:
+        if symbol in _sip_flows:
+            continue  # already handled by cancel_evt above
+        if limit_order_id:
+            try:
+                kite = _main.get_kite()
+                kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=str(limit_order_id))
+                print(f"[sip] {symbol}: cancelled orphaned LIMIT BUY {limit_order_id} on pause")
+            except Exception as e:
+                print(f"[sip] {symbol}: cancel orphan error — {e}")
+        with _db() as conn:
+            conn.execute("""
+                UPDATE sip_flows SET status='paused'
+                WHERE symbol=? AND status IN ('limit_placed', 'waiting')
+                AND DATE(created_at)=?
+                AND id=(SELECT MAX(id) FROM sip_flows WHERE symbol=?)
+            """, (symbol, today, symbol))
+        print(f"[sip] {symbol}: orphaned flow marked paused")
+
     print("[sip] strategy paused — all flows cancelled")
     return {"paused": True}
 
@@ -531,15 +565,17 @@ def sip_resume():
     if not _main._access_token:
         return {"paused": False, "restarted": []}
 
+    today = _now_ist().date().isoformat()
     with _db() as conn:
         rows = conn.execute("""
-            SELECT symbol FROM sip_flows
-            WHERE status = 'paused'
+            SELECT symbol, limit_order_id FROM sip_flows
+            WHERE status IN ('paused', 'limit_placed', 'waiting')
+            AND DATE(created_at) = ?
             AND id IN (SELECT MAX(id) FROM sip_flows GROUP BY symbol)
-        """).fetchall()
+        """, (today,)).fetchall()
 
     restarted = []
-    for (symbol,) in rows:
+    for symbol, limit_order_id in rows:
         if symbol in _sip_flows or symbol in _sip_disabled_stocks:
             continue
         flow = SIPFlow(symbol=symbol, alert_id=None, alert_time=_now_ist(), simulate=False)
