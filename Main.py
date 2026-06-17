@@ -80,7 +80,6 @@ _ticker       = None
 _ticker_shutdown    = False
 
 
-_ticker_reconnecting = False
 _paused             = False
 _eb_paused          = False
 
@@ -107,10 +106,9 @@ def _sync_orders_from_rest(access_token: str):
 
 
 def start_ticker(access_token: str):
-    global _ticker, _ticker_reconnecting
-    _ticker_reconnecting = True
+    global _ticker
     old = _ticker
-    _ticker = None          # null out before close so old on_close sees (ticker is None) → skips reconnect
+    _ticker = None          # null out before close so old on_close skips reconnect
     if old:
         try:
             old.close()
@@ -135,25 +133,16 @@ def start_ticker(access_token: str):
             )
 
     def on_connect(ws, response):
-        global _ticker_reconnecting
-        _ticker_reconnecting = False
         print("[ticker] Connected to Zerodha order stream.")
         resubscribe_all(ws)
         import threading
         threading.Thread(target=_sync_orders_from_rest, args=(access_token,), daemon=True).start()
+        if _main_loop and not _main_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(_schedule_market_close(ticker), _main_loop)
 
     def on_close(ws, code, reason):
-        global _ticker_reconnecting
-        print(f"[ticker] Disconnected: {reason}")
-        # Only reconnect if this is still the active ticker (not one that was replaced by start_ticker).
-        # start_ticker sets _ticker=None before closing old ticker, so old on_close skips this.
-        # Also skip if a reconnect coroutine is already running (_ticker_reconnecting guard).
-        if not _ticker_shutdown and ticker is _ticker and not _ticker_reconnecting:
-            _ticker_reconnecting = True
-            if _main_loop and not _main_loop.is_closed():
-                asyncio.run_coroutine_threadsafe(
-                    _reconnect_async(access_token), _main_loop
-                )
+        if ticker is _ticker or _ticker is None:
+            print(f"[ticker] Disconnected: {reason}. Use Force Connect to reconnect.")
 
     def on_error(ws, code, reason):
         print(f"[ticker] Error {code}: {reason}")
@@ -163,49 +152,24 @@ def start_ticker(access_token: str):
     ticker.on_connect       = on_connect
     ticker.on_close         = on_close
     ticker.on_error         = on_error
-    _ticker = ticker        # set BEFORE connect so on_close sees correct _ticker if connection fails immediately
+    _ticker = ticker        # set BEFORE connect so on_close sees correct _ticker
     ticker.connect(threaded=True)
     return ticker
 
 
-async def _reconnect_async(prev_token: str, delay: int = 30):
-    """Reload token and restart ticker — always runs on the main event loop.
-    Loops internally so only ONE coroutine is ever active at a time."""
-    global _ticker_reconnecting
-    await asyncio.sleep(delay)
-
-    while True:
-        if _ticker_shutdown:
-            _ticker_reconnecting = False
-            return
-
-        from datetime import timezone as _tz, timedelta as _td
-        ist_now = datetime.now(_tz(_td(hours=5, minutes=30)))
-        if ist_now.hour >= 15:
-            print(f"[ticker] Reconnect stopped — past 3:00 PM IST ({ist_now.strftime('%H:%M')})")
-            _ticker_reconnecting = False
-            return
-
-        if _ticker and _ticker.is_connected():
-            print("[ticker] Already connected, skipping reconnect")
-            _ticker_reconnecting = False
-            return
-
-        new_token = _load_token_from_json()
-        if not new_token:
-            print("[ticker] Reconnect skipped — no token in token.json")
-            _ticker_reconnecting = False
-            return
-
-        if new_token == prev_token:
-            print("[ticker] Token unchanged, retrying in 60s...")
-            await asyncio.sleep(60)
-            continue   # loop — no new coroutine spawned
-
-        print("[ticker] Reconnecting with refreshed token...")
-        start_ticker(new_token)
-        # _ticker_reconnecting cleared by on_connect
+async def _schedule_market_close(ticker_instance):
+    """Disconnect ticker at 3:30 PM IST when market closes."""
+    from datetime import timezone as _tz, timedelta as _td
+    ist_now   = datetime.now(_tz(_td(hours=5, minutes=30)))
+    close_ist = ist_now.replace(hour=15, minute=30, second=0, microsecond=0)
+    wait_secs = (close_ist - ist_now).total_seconds()
+    if wait_secs <= 0:
         return
+    print(f"[ticker] Market close disconnect scheduled in {wait_secs:.0f}s (3:30 PM IST)")
+    await asyncio.sleep(wait_secs)
+    if ticker_instance is _ticker and _ticker and _ticker.is_connected():
+        print("[ticker] Market closed — disconnecting KiteTicker")
+        _ticker.close()
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
