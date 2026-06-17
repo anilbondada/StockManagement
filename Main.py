@@ -179,6 +179,13 @@ async def _reconnect_async(prev_token: str, delay: int = 30):
             _ticker_reconnecting = False
             return
 
+        from datetime import timezone as _tz, timedelta as _td
+        ist_now = datetime.now(_tz(_td(hours=5, minutes=30)))
+        if ist_now.hour >= 15:
+            print(f"[ticker] Reconnect stopped — past 3:00 PM IST ({ist_now.strftime('%H:%M')})")
+            _ticker_reconnecting = False
+            return
+
         if _ticker and _ticker.is_connected():
             print("[ticker] Already connected, skipping reconnect")
             _ticker_reconnecting = False
