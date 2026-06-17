@@ -147,7 +147,8 @@ def start_ticker(access_token: str):
         print(f"[ticker] Disconnected: {reason}")
         # Only reconnect if this is still the active ticker (not one that was replaced by start_ticker).
         # start_ticker sets _ticker=None before closing old ticker, so old on_close skips this.
-        if not _ticker_shutdown and ticker is _ticker:
+        # Also skip if a reconnect coroutine is already running (_ticker_reconnecting guard).
+        if not _ticker_shutdown and ticker is _ticker and not _ticker_reconnecting:
             _ticker_reconnecting = True
             if _main_loop and not _main_loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
@@ -168,37 +169,36 @@ def start_ticker(access_token: str):
 
 
 async def _reconnect_async(prev_token: str, delay: int = 30):
-    """Reload token and restart ticker — always runs on the main event loop."""
+    """Reload token and restart ticker — always runs on the main event loop.
+    Loops internally so only ONE coroutine is ever active at a time."""
     global _ticker_reconnecting
     await asyncio.sleep(delay)
 
-    if _ticker_shutdown:
-        _ticker_reconnecting = False
-        return
-
-    if _ticker and _ticker.is_connected():
-        print("[ticker] Already connected externally, skipping reconnect")
-        _ticker_reconnecting = False
-        return
-
-    new_token = _load_token_from_json()
-    if not new_token:
-        print("[ticker] Reconnect skipped — no token in token.json")
-        _ticker_reconnecting = False
-        return
-
-    if new_token == prev_token:
-        print("[ticker] Token unchanged, retrying in 60s...")
-        await asyncio.sleep(60)
-        if not (_ticker and _ticker.is_connected()):
-            asyncio.ensure_future(_reconnect_async(prev_token, delay=0))
-        else:
+    while True:
+        if _ticker_shutdown:
             _ticker_reconnecting = False
-        return
+            return
 
-    print("[ticker] Reconnecting with refreshed token...")
-    start_ticker(new_token)
-    # _ticker_reconnecting cleared by on_connect
+        if _ticker and _ticker.is_connected():
+            print("[ticker] Already connected, skipping reconnect")
+            _ticker_reconnecting = False
+            return
+
+        new_token = _load_token_from_json()
+        if not new_token:
+            print("[ticker] Reconnect skipped — no token in token.json")
+            _ticker_reconnecting = False
+            return
+
+        if new_token == prev_token:
+            print("[ticker] Token unchanged, retrying in 60s...")
+            await asyncio.sleep(60)
+            continue   # loop — no new coroutine spawned
+
+        print("[ticker] Reconnecting with refreshed token...")
+        start_ticker(new_token)
+        # _ticker_reconnecting cleared by on_connect
+        return
 
 
 # ── Database ─────────────────────────────────────────────────────────────────
