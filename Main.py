@@ -153,7 +153,12 @@ def start_ticker(access_token: str):
     ticker.on_close         = on_close
     ticker.on_error         = on_error
     _ticker = ticker        # set BEFORE connect so on_close sees correct _ticker
-    ticker.connect(threaded=True)
+    from twisted.internet import reactor as _twisted_reactor
+    if _twisted_reactor.running:
+        # Reactor already running in its thread — must schedule connectWS from reactor thread
+        _twisted_reactor.callFromThread(ticker.connect)
+    else:
+        ticker.connect(threaded=True)
     return ticker
 
 
