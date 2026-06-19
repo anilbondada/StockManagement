@@ -110,45 +110,44 @@ async def control_force_connect():
 
 
 
-def _pause_sip():
+def _pause_all_strategies():
     import StockInPlay as _sip
-    _sip._sip_paused = True
-    for flow in list(_sip._sip_flows.values()):
-        flow.cancel_evt.set()
-    print("[control] SIP strategy paused — all flows cancelled")
+    _main.eb_pause()
+    _sip.sip_pause()
 
 
-def _resume_sip():
+def _resume_all_strategies():
     import StockInPlay as _sip
-    _sip._sip_paused = False
-    print("[control] SIP strategy resumed")
+    _main.eb_resume()
+    _sip.sip_resume()
 
 
 @router.post("/api/control/pause")
 async def control_pause():
     _main._paused = True
-    _pause_sip()
     loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _pause_all_strategies)
     result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
-    print(f"[control] PAUSED — {result['cancelled']} orders cancelled, ticker disconnected")
+    print(f"[control] PAUSED — all strategies paused, {result['cancelled']} orders cancelled, ticker disconnected")
     return {"paused": True, "ticker": "disconnected", **result}
 
 
 @router.post("/api/control/resume")
 async def control_resume():
     _main._paused = False
-    _resume_sip()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _resume_all_strategies)
     _start_ticker()
-    print("[control] RESUMED — ticker reconnected")
+    print("[control] RESUMED — all strategies resumed, ticker reconnected")
     return {"paused": False}
 
 
 @router.post("/api/control/stop")
 async def control_stop():
     _main._paused = True
-    _pause_sip()
     loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _pause_all_strategies)
     result = await loop.run_in_executor(None, _cancel_pending_webhook_orders)
     _stop_ticker()
     try:
