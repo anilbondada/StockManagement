@@ -38,6 +38,7 @@ SIP_DEFAULTS = {
     "min_upper_circuit_pct": "20",   # skip if upper circuit % <= this
     "max_gapup_gain_pct":   "10",   # skip if (day_open - prev_close) / prev_close * 100 > this
     "deadline_time":         "15:00", # cancel unfilled orders after this IST time (HH:MM)
+    "webhook_cutoff_hour":   "10",   # ignore new SIP webhooks at or after this hour (IST, 24h)
 }
 
 
@@ -342,6 +343,14 @@ def stock_config_ui():
         </div>
         <div class="hint">Cancel unfilled limit orders and stop recalibrating after this time (HH:MM, 24h IST)</div>
       </div>
+      <div class="field">
+        <label>Webhook Cutoff Hour (IST)</label>
+        <div class="input-row">
+          <input type="number" id="sip_webhook_cutoff_hour" step="1" min="0" max="23" placeholder="10" style="max-width:90px"/>
+          <span>h</span>
+        </div>
+        <div class="hint">Ignore new SIP webhooks received at or after this hour (IST, 24h). Default: 10 = ignore from 10:00 AM onwards.</div>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Buy Order Quantity by LTP Range</div>
@@ -384,7 +393,7 @@ def stock_config_ui():
     const FIELDS = {
       eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
-            'min_upper_circuit_pct','max_gapup_gain_pct','deadline_time']
+            'min_upper_circuit_pct','max_gapup_gain_pct','deadline_time','webhook_cutoff_hour']
     };
     const API = { eb: '/api/stock-config', sip: '/api/stockinplay-config' };
 

@@ -27,7 +27,6 @@ from fastapi.responses import HTMLResponse
 
 DB_FILE           = "alerts.db"
 IST               = timezone(timedelta(hours=5, minutes=30))
-WEBHOOK_CUTOFF    = 10   # ignore webhooks at or after 10:00 AM
 
 router = APIRouter()
 
@@ -395,9 +394,11 @@ async def webhook_stockinplay(payload: dict):
     ist_now   = _now_ist()
     is_sim    = bool(payload.get("_simulate"))   # bypass time checks when simulating
 
-    if not is_sim and ist_now.hour >= WEBHOOK_CUTOFF:
-        print(f"[sip] webhook ignored — after {WEBHOOK_CUTOFF}:00 AM")
-        return {"status": "ignored", "reason": f"after_cutoff ({WEBHOOK_CUTOFF}:00 AM IST)"}
+    from StockConfig import get_stockinplay_config
+    cutoff_hour = int(get_stockinplay_config().get("webhook_cutoff_hour", 10))
+    if not is_sim and ist_now.hour >= cutoff_hour:
+        print(f"[sip] webhook ignored — after {cutoff_hour}:00")
+        return {"status": "ignored", "reason": f"after_cutoff ({cutoff_hour}:00 IST)"}
 
     if _main._paused:
         print("[sip] webhook ignored — system paused")
