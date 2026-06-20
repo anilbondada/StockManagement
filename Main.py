@@ -1077,13 +1077,14 @@ def _render_eb_stocks_table(stocks: list) -> str:
         if status == "placed" and order_id:
             action = f'<button class="action-btn cancel-btn" onclick="cancelEBOrder(\'{esc(order_id)}\')">Cancel</button>'
 
+        detail_cell = detail or '<span style="color:#4b5563">—</span>'
         rows.append(
             f'<tr>'
             f'<td><strong>{esc(st["symbol"])}</strong></td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{alert_ts}</td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{pct_str}</td>'
             f'<td><span class="badge s-{esc(status)}">{esc(status)}</span></td>'
-            f'<td style="max-width:240px">{detail or \'<span style="color:#4b5563">—</span>\'}</td>'
+            f'<td style="max-width:240px">{detail_cell}</td>'
             f'<td>{action}</td>'
             f'</tr>'
         )
