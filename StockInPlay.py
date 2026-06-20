@@ -242,6 +242,7 @@ def _run_sip_flow(flow: SIPFlow):
             min_book_qty       = int(cfg.get("min_book_qty", 100000))
             min_upper_ckt_pct  = float(cfg.get("min_upper_circuit_pct", 20))
             max_gapup_gain_pct = float(cfg.get("max_gapup_gain_pct", 10))
+            skip_ltp           = float(cfg.get("skip_ltp", 1000))
 
             upper_ckt_pct  = ((upper_circuit_limit - prev_day_close) / prev_day_close * 100
                               if prev_day_close else 0)
@@ -249,6 +250,12 @@ def _run_sip_flow(flow: SIPFlow):
                               if prev_day_close else 0)
 
             # Static conditions — fixed for the day, no point retrying
+            if ltp > skip_ltp:
+                note = f"ltp {ltp} > skip_ltp {skip_ltp}"
+                print(f"[sip] {symbol}: skip (permanent) — {note}")
+                flow.status = "skipped"
+                _save_flow(flow, note=note)
+                break
             if upper_ckt_pct < min_upper_ckt_pct:
                 note = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}%"
                 print(f"[sip] {symbol}: skip (permanent) — {note}")
