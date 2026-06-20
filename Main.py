@@ -1904,20 +1904,37 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
             # Liquidity met — place order
             trigger_price = round(candle_high + 1, 2)
             limit_price   = round(candle_high + 1, 2)
-            quantity      = qty_for_ltp(ltp, cfg)
 
-            order_id = kite.place_order(
-                variety          = kite.VARIETY_REGULAR,
-                exchange         = "NSE",
-                tradingsymbol    = symbol,
-                transaction_type = "BUY",
-                quantity         = quantity,
-                product          = "MIS",
-                order_type       = "SL",
-                validity         = "DAY",
-                price            = limit_price,
-                trigger_price    = trigger_price,
-            )
+            quantity = qty_for_ltp(ltp, cfg)
+
+            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at LTP
+            if ltp >= trigger_price:
+                limit_buy_price = round(ltp, 2)
+                print(f"[eb-monitor] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {limit_buy_price}")
+                order_id = kite.place_order(
+                    variety          = kite.VARIETY_REGULAR,
+                    exchange         = "NSE",
+                    tradingsymbol    = symbol,
+                    transaction_type = "BUY",
+                    quantity         = quantity,
+                    product          = "MIS",
+                    order_type       = "LIMIT",
+                    validity         = "DAY",
+                    price            = limit_buy_price,
+                )
+            else:
+                order_id = kite.place_order(
+                    variety          = kite.VARIETY_REGULAR,
+                    exchange         = "NSE",
+                    tradingsymbol    = symbol,
+                    transaction_type = "BUY",
+                    quantity         = quantity,
+                    product          = "MIS",
+                    order_type       = "SL",
+                    validity         = "DAY",
+                    price            = limit_price,
+                    trigger_price    = trigger_price,
+                )
             print(f"[eb-monitor] {symbol}: liquidity met — order_id={order_id} trigger={trigger_price}")
             subscribe_to_stock(symbol, None, kite=kite)
             with _db() as conn:
@@ -2000,21 +2017,40 @@ def _run_auto_orders(kite, rows: list) -> dict:
             limit_price   = round(candle_high + 1, 2)
             quantity      = qty_for_ltp(ltp, cfg)
 
-            order_id = kite.place_order(
-                variety          = kite.VARIETY_REGULAR,
-                exchange         = "NSE",
-                tradingsymbol    = symbol,
-                transaction_type = "BUY",
-                quantity         = quantity,
-                product          = "MIS",
-                order_type       = "SL",
-                validity         = "DAY",
-                price            = limit_price,
-                trigger_price    = trigger_price,
-            )
-            placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price,
-                            "limit": limit_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
-            print(f"[auto-order] {symbol}: order_id={order_id} trigger={trigger_price} limit={limit_price}")
+            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at LTP
+            if ltp >= trigger_price:
+                limit_buy_price = round(ltp, 2)
+                print(f"[auto-order] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {limit_buy_price}")
+                order_id = kite.place_order(
+                    variety          = kite.VARIETY_REGULAR,
+                    exchange         = "NSE",
+                    tradingsymbol    = symbol,
+                    transaction_type = "BUY",
+                    quantity         = quantity,
+                    product          = "MIS",
+                    order_type       = "LIMIT",
+                    validity         = "DAY",
+                    price            = limit_buy_price,
+                )
+                placed.append({"symbol": symbol, "order_id": order_id, "trigger": None,
+                                "limit": limit_buy_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
+                print(f"[auto-order] {symbol}: order_id={order_id} LIMIT BUY at {limit_buy_price}")
+            else:
+                order_id = kite.place_order(
+                    variety          = kite.VARIETY_REGULAR,
+                    exchange         = "NSE",
+                    tradingsymbol    = symbol,
+                    transaction_type = "BUY",
+                    quantity         = quantity,
+                    product          = "MIS",
+                    order_type       = "SL",
+                    validity         = "DAY",
+                    price            = limit_price,
+                    trigger_price    = trigger_price,
+                )
+                placed.append({"symbol": symbol, "order_id": order_id, "trigger": trigger_price,
+                                "limit": limit_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
+                print(f"[auto-order] {symbol}: order_id={order_id} SL BUY trigger={trigger_price} limit={limit_price}")
             # Subscribe immediately so ticks stream from order placement.
             # sl_price=None until SELL SL is placed (updated by _fetch_complete_candle).
             # Pass the existing kite instance so the instruments cache is reused.
