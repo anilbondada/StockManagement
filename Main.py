@@ -434,6 +434,8 @@ def _fetch_complete_candle(data: dict):
                 import StockInPlay as _sip_mod
                 if _sip_mod._sip_paused:
                     print(f"[sip-sl] {symbol}: skipped — SIP strategy paused")
+                elif symbol in _sip_mod._sip_disabled_stocks:
+                    print(f"[sip-sl] {symbol}: skipped — stock was disabled/cancelled from UI")
                 elif transaction_type == "BUY" and quantity > 0:
                     day_high       = sip_limit_row[0] or c["high"]
                     sl_buy_trigger = round(day_high + 1, 2)
