@@ -907,6 +907,26 @@ def sip_control_ui():
     refreshEB();
   }
 
+  async function cancelEBRun(symbol, orderId) {
+    const res = await fetch('/api/eb/cancel-stock-run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol, order_id: orderId})
+    });
+    const data = await res.json();
+    if(data.error) alert('Cancel failed: ' + data.error);
+    refreshEB();
+  }
+
+  async function restoreEBRun(symbol) {
+    const res = await fetch('/api/eb/restore-stock', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol})
+    });
+    const data = await res.json();
+    if(data.error) alert('Restore failed: ' + data.error);
+    refreshEB();
+  }
+
   /* ── Init & polling ── */
   refreshSIP();
   setInterval(() => {

@@ -12,6 +12,7 @@ Endpoints:
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List
@@ -83,6 +84,7 @@ _ticker_shutdown    = False
 _paused                = False
 _eb_paused             = False
 _eb_monitoring_stocks: dict = {}   # symbol → threading.Event (cancel_evt)
+_eb_disabled_stocks:   set  = set()  # stocks cancelled from UI — block SELL SL placement
 
 
 def _load_token_from_json() -> Optional[str]:
@@ -493,6 +495,8 @@ def _fetch_complete_candle(data: dict):
                     subscribe_to_stock(symbol, sl_sell_trigger)
             elif _eb_paused:
                 print(f"[sell-order] {symbol}: skipped — EarlyBloom strategy paused")
+            elif symbol in _eb_disabled_stocks:
+                print(f"[sell-order] {symbol}: skipped — stock cancelled from UI")
             elif not is_webhook:
                 print(f"[sell-order] {symbol}: skipped — not a webhook order")
             elif transaction_type == "BUY" and quantity > 0:
@@ -1097,11 +1101,14 @@ def _render_eb_stocks_table(stocks: list) -> str:
         elif reason:
             detail = f'<span style="color:#9ca3af;font-size:.78rem">{esc(reason)}</span>'
 
+        sym = esc(st["symbol"])
         action = "—"
-        if status == "placed" and order_id:
-            action = f'<button class="action-btn cancel-btn" onclick="cancelEBOrder(\'{esc(order_id)}\')">Cancel</button>'
+        if status == "placed":
+            action = f'<button class="action-btn cancel-btn" onclick="cancelEBRun(\'{sym}\',\'{esc(order_id)}\')">Cancel Run</button>'
         elif status == "waiting":
-            action = f'<button class="action-btn cancel-btn" onclick="cancelEBMonitor(\'{esc(st["symbol"])}\')">Cancel</button>'
+            action = f'<button class="action-btn cancel-btn" onclick="cancelEBMonitor(\'{sym}\')">Cancel</button>'
+        elif status in ("cancelled", "skipped", "error"):
+            action = f'<button class="action-btn restore-btn" onclick="restoreEBRun(\'{sym}\')">Restore Run</button>'
 
         detail_cell = detail or '<span style="color:#4b5563">—</span>'
         rows.append(
@@ -1365,6 +1372,90 @@ def eb_cancel_stock(payload: dict):
         print(f"[eb] monitor cancelled for {symbol} from UI")
         return {"cancelled": symbol}
     return {"error": f"{symbol} not currently being monitored"}
+
+
+@app.post("/api/eb/cancel-stock-run")
+def eb_cancel_stock_run(payload: dict):
+    """Cancel a placed EB stock run — cancels the Kite order (if still open)
+    and blocks the SELL SL from being placed if BUY already filled."""
+    symbol   = (payload.get("symbol")   or "").strip().upper()
+    order_id = (payload.get("order_id") or "").strip()
+    if not symbol:
+        return {"error": "symbol required"}
+
+    _eb_disabled_stocks.add(symbol)
+
+    # Also cancel monitor thread if somehow still running
+    evt = _eb_monitoring_stocks.get(symbol)
+    if evt:
+        evt.set()
+
+    # Try to cancel the Kite order (may already be filled — that's fine)
+    cancelled_order = None
+    cancel_error    = None
+    if order_id:
+        try:
+            kite = get_kite()
+            kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+            cancelled_order = order_id
+            print(f"[eb] cancel-run: order {order_id} cancelled for {symbol}")
+        except Exception as e:
+            cancel_error = str(e)
+            print(f"[eb] cancel-run: order cancel failed for {symbol} ({order_id}): {e}")
+
+    with _db() as conn:
+        conn.execute(
+            "UPDATE stocks_fetched_info SET order_status='cancelled', skip_reason='cancelled from UI' WHERE symbol=? AND order_status='placed'",
+            (symbol,)
+        )
+
+    print(f"[eb] {symbol}: run cancelled from UI")
+    return {"cancelled": symbol, "order_id": cancelled_order, "cancel_error": cancel_error}
+
+
+@app.post("/api/eb/restore-stock")
+def eb_restore_stock(payload: dict):
+    """Restore a cancelled/skipped EB stock — restarts the liquidity monitor."""
+    symbol = (payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return {"error": "symbol required"}
+
+    _eb_disabled_stocks.discard(symbol)
+
+    # Look up today's alert_id and candle_high for this symbol
+    with _db() as conn:
+        row = conn.execute("""
+            SELECT alert_id, high FROM stocks_fetched_info
+            WHERE symbol = ? AND date(fetched_at) = date('now')
+            ORDER BY alert_id DESC LIMIT 1
+        """, (symbol,)).fetchone()
+
+    if not row:
+        return {"error": f"No candle data found for {symbol} today"}
+
+    alert_id, candle_high = row
+    if not candle_high:
+        return {"error": f"No candle high recorded for {symbol}"}
+
+    if symbol in _eb_monitoring_stocks:
+        return {"error": f"{symbol} already being monitored"}
+
+    with _db() as conn:
+        conn.execute(
+            "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason='restarted from UI', order_id=NULL WHERE alert_id=? AND symbol=?",
+            (alert_id, symbol)
+        )
+
+    cancel_evt = threading.Event()
+    _eb_monitoring_stocks[symbol] = cancel_evt
+    threading.Thread(
+        target=_eb_monitor_stock,
+        args=(alert_id, symbol, candle_high),
+        daemon=True,
+        name=f"eb-monitor-{symbol}",
+    ).start()
+    print(f"[eb] {symbol}: run restored from UI, monitor started")
+    return {"restored": symbol}
 
 
 @app.get("/api/chartink-alerts")
