@@ -390,9 +390,9 @@ def _fetch_complete_candle(data: dict):
             candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
             candle_end   = candle_start + _td(minutes=5)
 
-            # If fill lands within the first 30s of a new candle (e.g. 10:00:00 or 10:05:09),
-            # that candle has barely formed — use the next full candle instead
-            if (exec_dt - candle_start).total_seconds() < 30:
+            # If fill is mid-candle (not at exact candle boundary), skip to the next candle
+            # so SL high/low are based purely on post-fill price action, not pre-fill data
+            if exec_dt > candle_start:
                 candle_start = candle_end
                 candle_end   = candle_start + _td(minutes=5)
 
@@ -599,7 +599,7 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
         return
 
     from_dt = f"{date_str} 09:15:00"
-    to_dt   = f"{date_str} 09:30:00"
+    to_dt   = f"{date_str} 09:30:00" 
     print(f"[candle fetch] alert_id={alert_id} fetching {symbols} for {date_str}")
 
     from datetime import timedelta
