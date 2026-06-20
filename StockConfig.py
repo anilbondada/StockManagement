@@ -40,6 +40,7 @@ SIP_DEFAULTS = {
     "qty_1000_plus":         "25",
     "min_upper_circuit_pct": "20",   # skip if upper circuit % <= this
     "max_gapup_gain_pct":   "10",   # skip if (day_open - prev_close) / prev_close * 100 > this
+    "max_fib_gain_pct":     "10",   # skip if (fib_level - prev_close) / prev_close * 100 >= this
     "deadline_time":         "15:00", # cancel unfilled orders after this IST time (HH:MM)
     "webhook_cutoff_hour":   "10",   # ignore new SIP webhooks at or after this hour (IST, 24h)
 }
@@ -362,6 +363,14 @@ def stock_config_ui():
         <div class="hint">Skip if today's open − prev day close &gt; this % of prev close. Avoids stocks that gap-up too much at open.</div>
       </div>
       <div class="field">
+        <label>Max Fib Entry Gain from Prev Close</label>
+        <div class="input-row">
+          <input type="number" id="sip_max_fib_gain_pct" step="0.1" min="0" placeholder="10"/>
+          <span>%</span>
+        </div>
+        <div class="hint">Skip if (Fib 61.8% level − prev close) / prev close ≥ this %. Retried each candle as the day range shifts.</div>
+      </div>
+      <div class="field">
         <label>Flow Deadline (IST)</label>
         <div class="input-row">
           <input type="text" id="sip_deadline_time" placeholder="15:00" style="max-width:90px"/>
@@ -418,7 +427,7 @@ def stock_config_ui():
     const FIELDS = {
       eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_hour'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
-            'min_upper_circuit_pct','max_gapup_gain_pct','deadline_time','webhook_cutoff_hour']
+            'min_upper_circuit_pct','max_gapup_gain_pct','max_fib_gain_pct','deadline_time','webhook_cutoff_hour']
     };
     const API = { eb: '/api/stock-config', sip: '/api/stockinplay-config' };
 

@@ -297,6 +297,26 @@ def _run_sip_flow(flow: SIPFlow):
             fib_raw   = day_low + 0.618 * (day_high - day_low)
             fib_level = round(round(fib_raw / 0.05) * 0.05, 2)
 
+            # Dynamic: skip if fib entry gain from prev close is too high
+            max_fib_gain_pct = float(cfg.get("max_fib_gain_pct", 10))
+            fib_gain_pct = ((fib_level - prev_day_close) / prev_day_close * 100
+                            if prev_day_close else 0)
+            if fib_gain_pct >= max_fib_gain_pct:
+                skip_reason = (f"fib_gain {fib_gain_pct:.1f}% >= max {max_fib_gain_pct}% "
+                               f"(fib={fib_level} prev_close={prev_day_close})")
+                print(f"[sip] {symbol}: fib gain too high — {skip_reason}, retrying next candle")
+                flow.status = "waiting"
+                _save_flow(flow, note=skip_reason)
+                next_close = _next_candle_close(_now_ist())
+                wait       = _secs_until(next_close)
+                print(f"[sip] {symbol}: waiting {wait:.0f}s for next candle at {next_close.strftime('%H:%M')}")
+                if flow.cancel_evt.wait(timeout=wait):
+                    flow.status = "cancelled"
+                    _save_flow(flow)
+                    _sip_flows.pop(symbol, None)
+                    return
+                continue
+
             qty = qty_for_ltp_sip(ltp, cfg)
 
             # ── Step 5: LIMIT BUY at Fib 61.8 ────────────────────────────
