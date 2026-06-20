@@ -23,6 +23,7 @@ DEFAULTS = {
     "qty_500_800":           "100",
     "qty_800_1000":          "50",
     "qty_1000_plus":         "25",
+    "max_gapup_gain_pct":     "10",    # skip if (day_open - prev_close) / prev_close * 100 >= this
     "eb_deadline_time":      "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
     "eb_webhook_cutoff_hour": "10",    # ignore EB webhooks and skip order placement at or after this hour (IST, 24h)
 }
@@ -249,6 +250,14 @@ def stock_config_ui():
         <div class="hint">Stocks with LTP above this are skipped</div>
       </div>
       <div class="field">
+        <label>Max Gap-Up Gain from Prev Close</label>
+        <div class="input-row">
+          <input type="number" id="eb_max_gapup_gain_pct" step="0.1" min="0" placeholder="10"/>
+          <span>%</span>
+        </div>
+        <div class="hint">Skip if (day_open − prev_close) / prev_close × 100 ≥ this (e.g. 10 = skip if opened 10%+ higher)</div>
+      </div>
+      <div class="field">
         <label>Min Order Book Qty (Buy &amp; Sell)</label>
         <div class="input-row">
           <input type="number" id="eb_min_book_qty" step="1000" min="0" placeholder="100000"/>
@@ -407,7 +416,7 @@ def stock_config_ui():
 
   <script>
     const FIELDS = {
-      eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_hour'],
+      eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_hour'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
             'min_upper_circuit_pct','max_gapup_gain_pct','deadline_time','webhook_cutoff_hour']
     };
