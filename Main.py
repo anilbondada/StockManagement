@@ -498,19 +498,42 @@ def _fetch_complete_candle(data: dict):
             elif transaction_type == "BUY" and quantity > 0:
                 trigger_price = round(c["low"] - 1,   2)
                 limit_price   = round(c["low"] - 1.5, 2)
-                sell_order_id = kite.place_order(
-                    variety          = kite.VARIETY_REGULAR,
-                    exchange         = data.get("exchange", "NSE"),
-                    tradingsymbol    = symbol,
-                    transaction_type = "SELL",
-                    quantity         = quantity,
-                    product          = data.get("product", "MIS"),
-                    order_type       = "SL",
-                    validity         = "DAY",
-                    price            = limit_price,
-                    trigger_price    = trigger_price,
-                )
-                print(f"[sell-order] {symbol}: order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
+                exchange      = data.get("exchange", "NSE")
+                product       = data.get("product", "MIS")
+
+                # SL SELL requires LTP > trigger_price; if already below, place MARKET SELL
+                try:
+                    current_ltp = kite.quote(f"{exchange}:{symbol}")[f"{exchange}:{symbol}"]["last_price"]
+                except Exception:
+                    current_ltp = trigger_price + 1  # assume valid if quote fails
+
+                if current_ltp < trigger_price:
+                    print(f"[sell-order] {symbol}: ltp {current_ltp} < trigger {trigger_price} — placing MARKET SELL")
+                    sell_order_id = kite.place_order(
+                        variety          = kite.VARIETY_REGULAR,
+                        exchange         = exchange,
+                        tradingsymbol    = symbol,
+                        transaction_type = "SELL",
+                        quantity         = quantity,
+                        product          = product,
+                        order_type       = "MARKET",
+                        validity         = "DAY",
+                    )
+                    print(f"[sell-order] {symbol}: MARKET SELL order_id={sell_order_id} qty={quantity}")
+                else:
+                    sell_order_id = kite.place_order(
+                        variety          = kite.VARIETY_REGULAR,
+                        exchange         = exchange,
+                        tradingsymbol    = symbol,
+                        transaction_type = "SELL",
+                        quantity         = quantity,
+                        product          = product,
+                        order_type       = "SL",
+                        validity         = "DAY",
+                        price            = limit_price,
+                        trigger_price    = trigger_price,
+                    )
+                    print(f"[sell-order] {symbol}: SL SELL order_id={sell_order_id} trigger={trigger_price} limit={limit_price} qty={quantity}")
                 subscribe_to_stock(symbol, trigger_price)
                 with _db() as conn:
                     conn.execute(
