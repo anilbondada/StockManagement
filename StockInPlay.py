@@ -740,6 +740,8 @@ def sip_control_ui():
     .s-skipped,.s-deadline,.s-idle{background:#1f2937;color:#6b7280}
     .s-cancelled{background:#450a0a;color:#fca5a5}
     .s-error{background:#450a0a;color:#fca5a5}
+    .s-placed{background:#14532d;color:#86efac}
+    .s-pending{background:#1e3a5f;color:#93c5fd}
     .b-open{background:#dbeafe;color:#1e40af}
     .b-tp{background:#fef9c3;color:#854d0e}
     .b-complete{background:#d1fae5;color:#065f46}

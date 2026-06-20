@@ -227,6 +227,12 @@ def init_db():
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN prev_day_close REAL")
         if "pct_change" not in existing:
             conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN pct_change REAL")
+        if "order_status" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN order_status TEXT")
+        if "skip_reason" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN skip_reason TEXT")
+        if "order_id" not in existing:
+            conn.execute("ALTER TABLE stocks_fetched_info ADD COLUMN order_id TEXT")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS order_updates (
@@ -637,7 +643,7 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
         if skip_time_gate or ist_now.hour < 10:
             with _db() as conn:
                 order_rows = conn.execute("""
-                    SELECT symbol, high, pct_change FROM stocks_fetched_info
+                    SELECT alert_id, symbol, high, pct_change FROM stocks_fetched_info
                     WHERE alert_id = ? AND pct_change IS NOT NULL AND high IS NOT NULL
                 """, (alert_id,)).fetchall()
             if order_rows:
@@ -1046,6 +1052,48 @@ def order_updates_table_ui():
 """
 
 
+def _render_eb_stocks_table(stocks: list) -> str:
+    """Render triggered-stocks table for EarlyBloom (similar to SIP stocks table)."""
+    if not stocks:
+        return '<div class="empty">No stocks triggered today.</div>'
+    def esc(s):
+        return str(s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+    rows = []
+    for st in stocks:
+        status   = st.get("order_status") or "pending"
+        alert_ts = (st.get("received_at") or "").replace("T"," ")[11:16] or "—"
+        pct      = st.get("pct_change")
+        pct_str  = f"{pct:+.1f}%" if pct is not None else "—"
+        reason   = st.get("skip_reason") or ""
+        order_id = st.get("order_id") or ""
+
+        detail = ""
+        if order_id:
+            detail = f'Order&nbsp;<code style="font-size:.72rem;color:#93c5fd">{esc(order_id)}</code>'
+        elif reason:
+            detail = f'<span style="color:#9ca3af;font-size:.78rem">{esc(reason)}</span>'
+
+        action = "—"
+        if status == "placed" and order_id:
+            action = f'<button class="action-btn cancel-btn" onclick="cancelEBOrder(\'{esc(order_id)}\')">Cancel</button>'
+
+        rows.append(
+            f'<tr>'
+            f'<td><strong>{esc(st["symbol"])}</strong></td>'
+            f'<td style="color:#9ca3af;font-size:.78rem">{alert_ts}</td>'
+            f'<td style="color:#9ca3af;font-size:.78rem">{pct_str}</td>'
+            f'<td><span class="badge s-{esc(status)}">{esc(status)}</span></td>'
+            f'<td style="max-width:240px">{detail or \'<span style="color:#4b5563">—</span>\'}</td>'
+            f'<td>{action}</td>'
+            f'</tr>'
+        )
+    return (
+        '<table><thead><tr>'
+        '<th>Symbol</th><th>Alert</th><th>% Chg</th><th>Status</th><th>Reason / Order</th><th>Action</th>'
+        '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+    )
+
+
 def _render_eb_table(rows: list) -> str:
     if not rows:
         return '<div class="empty">No EarlyBloom orders today.</div>'
@@ -1190,6 +1238,21 @@ def eb_resume():
 def eb_table():
     with _db() as conn:
         conn.row_factory = sqlite3.Row
+        # Triggered stocks (today, latest alert per symbol)
+        stock_rows = conn.execute("""
+            SELECT s.symbol, s.pct_change, s.order_status, s.skip_reason, s.order_id,
+                   a.received_at
+            FROM stocks_fetched_info s
+            JOIN chartink_alerts a ON a.id = s.alert_id
+            JOIN (
+                SELECT symbol, MAX(alert_id) AS max_alert
+                FROM stocks_fetched_info
+                WHERE date(fetched_at) = date('now')
+                GROUP BY symbol
+            ) latest ON s.symbol = latest.symbol AND s.alert_id = latest.max_alert
+            ORDER BY a.received_at DESC, s.symbol
+        """).fetchall()
+        # Orders placed today for EB (not SIP)
         order_rows = conn.execute("""
             SELECT ou.order_id, ou.tradingsymbol, ou.transaction_type,
                    ou.trigger_price, ou.average_price, ou.quantity,
@@ -1212,7 +1275,18 @@ def eb_table():
             ORDER BY received_at DESC
         """).fetchall()
 
-    html = _render_eb_table([dict(r) for r in order_rows])
+    stocks_html = _render_eb_stocks_table([dict(r) for r in stock_rows])
+    orders_html = _render_eb_table([dict(r) for r in order_rows])
+
+    html = stocks_html
+
+    if order_rows:
+        html += (
+            '<div style="margin-top:22px;padding-top:14px;border-top:1px solid #2a2a3e">'
+            '<div style="font-size:.72rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#f59e0b;margin-bottom:10px">Today\'s Orders</div>'
+            + orders_html +
+            '</div>'
+        )
 
     if paused_rows:
         def esc(s): return str(s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -1730,7 +1804,9 @@ def orders_ui():
 
 
 def _run_auto_orders(kite, rows: list) -> dict:
-    """Place SL BUY MIS orders using rules from stock_config table."""
+    """Place SL BUY MIS orders using rules from stock_config table.
+    Each row must be (alert_id, symbol, candle_high, pct_change).
+    """
     cfg             = get_config()
     skip_pct        = float(cfg.get("skip_pct_change", 8))
     skip_ltp        = float(cfg.get("skip_ltp", 800))
@@ -1740,7 +1816,7 @@ def _run_auto_orders(kite, rows: list) -> dict:
     skipped = []
     errors  = []
 
-    for symbol, candle_high, pct_change in rows:
+    for alert_id, symbol, candle_high, pct_change in rows:
         try:
             quote    = kite.quote(f"NSE:{symbol}")
             qdata    = quote[f"NSE:{symbol}"]
@@ -1751,12 +1827,22 @@ def _run_auto_orders(kite, rows: list) -> dict:
             if pct_change >= skip_pct or ltp > skip_ltp:
                 reason = f"pct_change={pct_change}% >= {skip_pct}" if pct_change >= skip_pct else f"ltp={ltp} > {skip_ltp}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason=? WHERE alert_id=? AND symbol=?",
+                        (reason, alert_id, symbol)
+                    )
                 continue
 
             if buy_qty < min_book_qty or sell_qty < min_book_qty:
                 reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 print(f"[auto-order] {symbol}: skipped — {reason}")
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason=? WHERE alert_id=? AND symbol=?",
+                        (reason, alert_id, symbol)
+                    )
                 continue
 
             trigger_price = round(candle_high + 1, 2)
@@ -1790,10 +1876,19 @@ def _run_auto_orders(kite, rows: list) -> dict:
                        ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
                     (str(order_id), symbol, "BUY", datetime.now(timezone.utc).isoformat())
                 )
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='placed', order_id=? WHERE alert_id=? AND symbol=?",
+                    (str(order_id), alert_id, symbol)
+                )
 
         except Exception as e:
             errors.append({"symbol": symbol, "error": str(e)})
             print(f"[auto-order] {symbol}: ERROR {e}")
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='error', skip_reason=? WHERE alert_id=? AND symbol=?",
+                    (str(e), alert_id, symbol)
+                )
 
     return {"placed": placed, "skipped": skipped, "errors": errors}
 
@@ -1804,7 +1899,7 @@ def stocks_auto_order(x_kite_token: Optional[str] = Header(default=None)):
 
     with _db() as conn:
         rows = conn.execute("""
-            SELECT s.symbol, s.high, s.pct_change
+            SELECT s.alert_id, s.symbol, s.high, s.pct_change
             FROM stocks_fetched_info s
             INNER JOIN (
                 SELECT symbol, MAX(alert_id) AS max_alert
