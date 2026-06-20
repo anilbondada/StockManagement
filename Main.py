@@ -13,7 +13,7 @@ import asyncio
 import json
 import sqlite3
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
@@ -80,8 +80,9 @@ _ticker       = None
 _ticker_shutdown    = False
 
 
-_paused             = False
-_eb_paused          = False
+_paused                = False
+_eb_paused             = False
+_eb_monitoring_stocks: dict = {}   # symbol → threading.Event (cancel_evt)
 
 
 def _load_token_from_json() -> Optional[str]:
@@ -1076,6 +1077,8 @@ def _render_eb_stocks_table(stocks: list) -> str:
         action = "—"
         if status == "placed" and order_id:
             action = f'<button class="action-btn cancel-btn" onclick="cancelEBOrder(\'{esc(order_id)}\')">Cancel</button>'
+        elif status == "waiting":
+            action = f'<button class="action-btn cancel-btn" onclick="cancelEBMonitor(\'{esc(st["symbol"])}\')">Cancel</button>'
 
         detail_cell = detail or '<span style="color:#4b5563">—</span>'
         rows.append(
@@ -1195,6 +1198,11 @@ def eb_pause():
                             "paused",
                         ),
                     )
+
+    # Cancel all in-progress liquidity-monitor threads
+    for sym, evt in list(_eb_monitoring_stocks.items()):
+        evt.set()
+        print(f"[eb] paused — cancelled monitor for {sym}")
 
     return {"paused": True, "cancelled": cancelled, "errors": errors}
 
@@ -1321,6 +1329,19 @@ def eb_cancel_order(payload: dict):
         return {"cancelled": order_id}
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/api/eb/cancel-stock")
+def eb_cancel_stock(payload: dict):
+    symbol = (payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return {"error": "symbol required"}
+    evt = _eb_monitoring_stocks.get(symbol)
+    if evt:
+        evt.set()
+        print(f"[eb] monitor cancelled for {symbol} from UI")
+        return {"cancelled": symbol}
+    return {"error": f"{symbol} not currently being monitored"}
 
 
 @app.get("/api/chartink-alerts")
@@ -1804,6 +1825,125 @@ def orders_ui():
 """
 
 
+def _eb_next_candle_close(dt) -> datetime:
+    """Start of the next 5-min candle (= close of the current one) in IST."""
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    dt_ist = dt.astimezone(_IST)
+    candle_start = dt_ist.replace(minute=(dt_ist.minute // 5) * 5, second=0, microsecond=0)
+    return candle_start + timedelta(minutes=5)
+
+
+def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
+    """Retry placing EB order each candle when liquidity was initially insufficient."""
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    cancel_evt = _eb_monitoring_stocks.get(symbol)
+    if cancel_evt is None:
+        return
+
+    cfg          = get_config()
+    min_book_qty = int(cfg.get("min_book_qty", 100000))
+
+    while not cancel_evt.is_set():
+        if _eb_paused:
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='paused' WHERE alert_id=? AND symbol=?",
+                    (alert_id, symbol)
+                )
+            _eb_monitoring_stocks.pop(symbol, None)
+            return
+
+        now        = datetime.now(_IST)
+        deadline   = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        if now >= deadline:
+            print(f"[eb-monitor] {symbol}: deadline reached, stopping monitor")
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason='deadline reached' WHERE alert_id=? AND symbol=?",
+                    (alert_id, symbol)
+                )
+            _eb_monitoring_stocks.pop(symbol, None)
+            return
+
+        next_close = _eb_next_candle_close(now)
+        wait_secs  = max(0.0, (next_close - now).total_seconds())
+        print(f"[eb-monitor] {symbol}: waiting {wait_secs:.0f}s for candle at {next_close.strftime('%H:%M')}")
+
+        if cancel_evt.wait(timeout=wait_secs):
+            print(f"[eb-monitor] {symbol}: cancelled from UI")
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason='cancelled from UI' WHERE alert_id=? AND symbol=?",
+                    (alert_id, symbol)
+                )
+            _eb_monitoring_stocks.pop(symbol, None)
+            return
+
+        try:
+            kite    = get_kite()
+            cfg     = get_config()
+            min_book_qty = int(cfg.get("min_book_qty", 100000))
+            quote   = kite.quote(f"NSE:{symbol}")
+            qdata   = quote[f"NSE:{symbol}"]
+            ltp     = qdata["last_price"]
+            buy_qty = qdata.get("buy_quantity", 0)
+            sell_qty = qdata.get("sell_quantity", 0)
+
+            if buy_qty < min_book_qty or sell_qty < min_book_qty:
+                reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
+                print(f"[eb-monitor] {symbol}: liquidity still insufficient — {reason}, retrying next candle")
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason=? WHERE alert_id=? AND symbol=?",
+                        (reason, alert_id, symbol)
+                    )
+                continue
+
+            # Liquidity met — place order
+            trigger_price = round(candle_high + 1, 2)
+            limit_price   = round(candle_high + 1, 2)
+            quantity      = qty_for_ltp(ltp, cfg)
+
+            order_id = kite.place_order(
+                variety          = kite.VARIETY_REGULAR,
+                exchange         = "NSE",
+                tradingsymbol    = symbol,
+                transaction_type = "BUY",
+                quantity         = quantity,
+                product          = "MIS",
+                order_type       = "SL",
+                validity         = "DAY",
+                price            = limit_price,
+                trigger_price    = trigger_price,
+            )
+            print(f"[eb-monitor] {symbol}: liquidity met — order_id={order_id} trigger={trigger_price}")
+            subscribe_to_stock(symbol, None, kite=kite)
+            with _db() as conn:
+                conn.execute(
+                    """INSERT INTO order_updates (order_id, tradingsymbol, transaction_type, is_webhook_order, last_updated)
+                       VALUES (?,?,?,1,?) ON CONFLICT(order_id) DO UPDATE SET is_webhook_order=1""",
+                    (str(order_id), symbol, "BUY", datetime.now(timezone.utc).isoformat())
+                )
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='placed', order_id=?, skip_reason=NULL WHERE alert_id=? AND symbol=?",
+                    (str(order_id), alert_id, symbol)
+                )
+            _eb_monitoring_stocks.pop(symbol, None)
+            return
+
+        except Exception as e:
+            print(f"[eb-monitor] {symbol}: ERROR {e}")
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE stocks_fetched_info SET order_status='error', skip_reason=? WHERE alert_id=? AND symbol=?",
+                    (str(e), alert_id, symbol)
+                )
+            _eb_monitoring_stocks.pop(symbol, None)
+            return
+
+    _eb_monitoring_stocks.pop(symbol, None)
+
+
 def _run_auto_orders(kite, rows: list) -> dict:
     """Place SL BUY MIS orders using rules from stock_config table.
     Each row must be (alert_id, symbol, candle_high, pct_change).
@@ -1837,13 +1977,21 @@ def _run_auto_orders(kite, rows: list) -> dict:
 
             if buy_qty < min_book_qty or sell_qty < min_book_qty:
                 reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
-                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
-                print(f"[auto-order] {symbol}: skipped — {reason}")
+                print(f"[auto-order] {symbol}: liquidity insufficient — {reason}, starting candle monitor")
                 with _db() as conn:
                     conn.execute(
-                        "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason=? WHERE alert_id=? AND symbol=?",
+                        "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason=? WHERE alert_id=? AND symbol=?",
                         (reason, alert_id, symbol)
                     )
+                if symbol not in _eb_monitoring_stocks:
+                    cancel_evt = threading.Event()
+                    _eb_monitoring_stocks[symbol] = cancel_evt
+                    threading.Thread(
+                        target=_eb_monitor_stock,
+                        args=(alert_id, symbol, candle_high),
+                        daemon=True,
+                        name=f"eb-monitor-{symbol}",
+                    ).start()
                 continue
 
             trigger_price = round(candle_high + 1, 2)

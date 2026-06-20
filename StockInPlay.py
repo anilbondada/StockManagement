@@ -897,6 +897,16 @@ def sip_control_ui():
     refreshEB();
   }
 
+  async function cancelEBMonitor(symbol) {
+    const res = await fetch('/api/eb/cancel-stock', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol})
+    });
+    const data = await res.json();
+    if(data.error) alert('Cancel failed: ' + data.error);
+    refreshEB();
+  }
+
   /* ── Init & polling ── */
   refreshSIP();
   setInterval(() => {
