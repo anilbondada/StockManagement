@@ -1907,10 +1907,9 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
 
             quantity = qty_for_ltp(ltp, cfg)
 
-            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at LTP
+            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at trigger_price
             if ltp >= trigger_price:
-                limit_buy_price = round(ltp, 2)
-                print(f"[eb-monitor] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {limit_buy_price}")
+                print(f"[eb-monitor] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {trigger_price}")
                 order_id = kite.place_order(
                     variety          = kite.VARIETY_REGULAR,
                     exchange         = "NSE",
@@ -1920,7 +1919,7 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
                     product          = "MIS",
                     order_type       = "LIMIT",
                     validity         = "DAY",
-                    price            = limit_buy_price,
+                    price            = trigger_price,
                 )
             else:
                 order_id = kite.place_order(
@@ -2017,10 +2016,9 @@ def _run_auto_orders(kite, rows: list) -> dict:
             limit_price   = round(candle_high + 1, 2)
             quantity      = qty_for_ltp(ltp, cfg)
 
-            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at LTP
+            # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at trigger_price
             if ltp >= trigger_price:
-                limit_buy_price = round(ltp, 2)
-                print(f"[auto-order] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {limit_buy_price}")
+                print(f"[auto-order] {symbol}: ltp {ltp} >= trigger {trigger_price} — placing LIMIT BUY at {trigger_price}")
                 order_id = kite.place_order(
                     variety          = kite.VARIETY_REGULAR,
                     exchange         = "NSE",
@@ -2030,11 +2028,11 @@ def _run_auto_orders(kite, rows: list) -> dict:
                     product          = "MIS",
                     order_type       = "LIMIT",
                     validity         = "DAY",
-                    price            = limit_buy_price,
+                    price            = trigger_price,
                 )
                 placed.append({"symbol": symbol, "order_id": order_id, "trigger": None,
-                                "limit": limit_buy_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
-                print(f"[auto-order] {symbol}: order_id={order_id} LIMIT BUY at {limit_buy_price}")
+                                "limit": trigger_price, "ltp": ltp, "pct_change": pct_change, "qty": quantity})
+                print(f"[auto-order] {symbol}: order_id={order_id} LIMIT BUY at {trigger_price}")
             else:
                 order_id = kite.place_order(
                     variety          = kite.VARIETY_REGULAR,
