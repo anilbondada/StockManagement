@@ -1854,9 +1854,11 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
             return
 
         now        = datetime.now(_IST)
-        deadline   = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        _dl_cfg    = get_stockinplay_config().get("deadline_time", "15:00")
+        _dl_h, _dl_m = (int(x) for x in _dl_cfg.split(":"))
+        deadline   = now.replace(hour=_dl_h, minute=_dl_m, second=0, microsecond=0)
         if now >= deadline:
-            print(f"[eb-monitor] {symbol}: deadline reached, stopping monitor")
+            print(f"[eb-monitor] {symbol}: deadline reached ({_dl_cfg}), stopping monitor")
             with _db() as conn:
                 conn.execute(
                     "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason='deadline reached' WHERE alert_id=? AND symbol=?",
