@@ -23,6 +23,7 @@ DEFAULTS = {
     "qty_500_800":      "100",
     "qty_800_1000":     "50",
     "qty_1000_plus":    "25",
+    "eb_deadline_time": "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
 }
 
 # ── StockInPlay defaults ──────────────────────────────────────────────────────
@@ -288,6 +289,14 @@ def stock_config_ui():
         </div>
       </div>
     </div>
+    <div class="card">
+      <div class="section-title">Flow Control</div>
+        <label>Flow Deadline (IST)</label>
+        <div class="input-row">
+          <input type="text" id="eb_eb_deadline_time" placeholder="15:00" style="max-width:90px"/>
+        </div>
+        <div class="hint">Stop monitoring liquidity and skip stock after this time (HH:MM, 24h IST)</div>
+    </div>
     <button class="btn-save" id="eb_saveBtn" onclick="save('eb')">Save EarlyBloom Configuration</button>
     <div class="toast" id="eb_toast"></div>
   </div>
@@ -391,7 +400,7 @@ def stock_config_ui():
 
   <script>
     const FIELDS = {
-      eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus'],
+      eb:  ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
             'min_upper_circuit_pct','max_gapup_gain_pct','deadline_time','webhook_cutoff_hour']
     };

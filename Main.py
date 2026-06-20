@@ -26,7 +26,7 @@ from ExcelUpload import router as excel_router
 from ControlPanel import router as control_router
 from StockInPlay import router as sip_router, init_sip_table
 from StockConfig import (router as config_router, get_config, qty_for_ltp, init_config_table,
-                         get_stockinplay_config, qty_for_ltp_sip, init_stockinplay_config_table)
+                         init_stockinplay_config_table)
 from LiveStockManager import (
     router as live_router,
     on_ticks as _live_on_ticks,
@@ -1854,7 +1854,7 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
             return
 
         now        = datetime.now(_IST)
-        _dl_cfg    = get_stockinplay_config().get("deadline_time", "15:00")
+        _dl_cfg    = get_config().get("eb_deadline_time", "15:00")
         _dl_h, _dl_m = (int(x) for x in _dl_cfg.split(":"))
         deadline   = now.replace(hour=_dl_h, minute=_dl_m, second=0, microsecond=0)
         if now >= deadline:
