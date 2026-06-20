@@ -735,6 +735,9 @@ async def callback(request_token: str):
         save_token(_access_token)
         _paused = False
         start_ticker(_access_token)
+        import StockInPlay as _sip_mod
+        eb_resume()
+        _sip_mod.sip_resume()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
     return {"message": "Login successful", "access_token": _access_token}
