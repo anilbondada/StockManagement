@@ -668,7 +668,8 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
     try:
         from datetime import timezone as tz
         ist_now = datetime.now(tz(timedelta(hours=5, minutes=30)))
-        if skip_time_gate or ist_now.hour < 10:
+        cutoff_hour = int(get_config().get("eb_webhook_cutoff_hour", 10))
+        if skip_time_gate or ist_now.hour < cutoff_hour:
             with _db() as conn:
                 order_rows = conn.execute("""
                     SELECT alert_id, symbol, high, pct_change FROM stocks_fetched_info
@@ -678,7 +679,7 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
                 result = _run_auto_orders(kite, order_rows)
                 print(f"[auto-order] alert_id={alert_id}: placed={len(result['placed'])} skipped={len(result['skipped'])} errors={len(result['errors'])}")
         else:
-            print(f"[auto-order] alert_id={alert_id}: skipped — current IST time {ist_now.strftime('%H:%M')} >= 10:00")
+            print(f"[auto-order] alert_id={alert_id}: skipped — current IST time {ist_now.strftime('%H:%M')} >= {cutoff_hour}:00")
     except Exception as e:
         print(f"[auto-order] alert_id={alert_id}: ERROR {e}")
 
@@ -2677,6 +2678,11 @@ async def earlybloom_webhook(payload: dict):
     if _paused:
         print("[webhook] System is PAUSED — alert received but ignored.")
         return {"received": False, "reason": "system_paused"}
+    ist_now     = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    cutoff_hour = int(get_config().get("eb_webhook_cutoff_hour", 10))
+    if ist_now.hour >= cutoff_hour:
+        print(f"[webhook] EarlyBloom ignored — after {cutoff_hour}:00 IST")
+        return {"received": False, "reason": f"after_cutoff ({cutoff_hour}:00 IST)"}
     if _eb_paused:
         loop     = asyncio.get_running_loop()
         alert_id = await loop.run_in_executor(None, save_alert, payload, "paused")
