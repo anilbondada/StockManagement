@@ -15,6 +15,8 @@ Flow:
 import asyncio
 import json
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone, timedelta, date
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -46,8 +48,10 @@ class ConnectionManager:
 
 
 live_candle_manager = ConnectionManager()
-_tick_candles: dict = {}   # (token, candle_start_iso) → candle dict
-_active_subs: dict  = {}   # instrument_token → {symbol, sl_price}
+_tick_candles: dict  = {}   # (token, candle_start_iso) → candle dict
+_active_subs: dict   = {}   # instrument_token → {symbol, sl_price}
+_tick_buffer: list   = []   # raw tick rows buffered for 1-min batch insert
+_tick_buffer_lock    = threading.Lock()
 
 
 # ── DB ────────────────────────────────────────────────────────────────────────
@@ -77,6 +81,60 @@ def init_live_table():
                 created_at       TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_ticks (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol           TEXT,
+                instrument_token INTEGER,
+                tick_time        TEXT,
+                last_price       REAL,
+                last_quantity    INTEGER,
+                last_trade_time  TEXT,
+                average_price    REAL,
+                volume_traded    INTEGER,
+                buy_quantity     INTEGER,
+                sell_quantity    INTEGER,
+                day_open         REAL,
+                day_high         REAL,
+                day_low          REAL,
+                prev_close       REAL,
+                change_pct       REAL,
+                oi               INTEGER,
+                oi_day_high      INTEGER,
+                oi_day_low       INTEGER,
+                depth_json       TEXT
+            )
+        """)
+    _start_tick_flush_thread()
+
+
+def _flush_tick_buffer():
+    while True:
+        time.sleep(60)
+        with _tick_buffer_lock:
+            if not _tick_buffer:
+                continue
+            rows = list(_tick_buffer)
+            _tick_buffer.clear()
+        try:
+            with _db() as conn:
+                conn.executemany("""
+                    INSERT INTO raw_ticks
+                    (symbol, instrument_token, tick_time,
+                     last_price, last_quantity, last_trade_time,
+                     average_price, volume_traded, buy_quantity, sell_quantity,
+                     day_open, day_high, day_low, prev_close, change_pct,
+                     oi, oi_day_high, oi_day_low, depth_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, rows)
+            print(f"[raw_ticks] Flushed {len(rows)} ticks to DB")
+        except Exception as e:
+            print(f"[raw_ticks] Flush error: {e}")
+
+
+def _start_tick_flush_thread():
+    t = threading.Thread(target=_flush_tick_buffer, daemon=True, name="tick-flush")
+    t.start()
 
 
 def restore_subscriptions():
@@ -183,16 +241,19 @@ def _flush_completed_candles(token: int, current_start: datetime):
 def on_ticks(ws, ticks):
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     now    = datetime.now(ist_tz)
+    tick_time = now.isoformat()
 
     for tick in ticks:
         token = tick["instrument_token"]
         if token not in _active_subs:
             continue
+
         price  = tick.get("last_price", 0)
         volume = tick.get("volume_traded", 0)
         start  = _candle_start(now)
         key    = (token, start.isoformat())
 
+        # ── 5-min candle aggregation ──────────────────────────────────────
         _flush_completed_candles(token, start)
 
         if key not in _tick_candles:
@@ -206,6 +267,35 @@ def on_ticks(ws, ticks):
             c["close"]  = price
             c["volume"] = volume
 
+        # ── Buffer raw tick for 1-min batch insert ────────────────────────
+        ohlc  = tick.get("ohlc", {})
+        depth = tick.get("depth", {})
+        ltt   = tick.get("last_trade_time")
+        ltt_str = ltt.isoformat() if hasattr(ltt, "isoformat") else str(ltt) if ltt else None
+        row = (
+            _active_subs[token].get("symbol", ""),
+            token,
+            tick_time,
+            price,
+            tick.get("last_quantity"),
+            ltt_str,
+            tick.get("average_price"),
+            volume,
+            tick.get("buy_quantity"),
+            tick.get("sell_quantity"),
+            ohlc.get("open"),
+            ohlc.get("high"),
+            ohlc.get("low"),
+            ohlc.get("close"),
+            tick.get("change"),
+            tick.get("oi"),
+            tick.get("oi_day_high"),
+            tick.get("oi_day_low"),
+            json.dumps(depth) if depth else None,
+        )
+        with _tick_buffer_lock:
+            _tick_buffer.append(row)
+
 
 # ── Subscribe / Unsubscribe ───────────────────────────────────────────────────
 
@@ -218,7 +308,7 @@ def subscribe_to_stock(symbol: str, sl_price, kite=None):
         _active_subs[token] = {"symbol": symbol, "sl_price": sl_price}
         if _main._ticker:
             _main._ticker.subscribe([token])
-            _main._ticker.set_mode(_main._ticker.MODE_QUOTE, [token])
+            _main._ticker.set_mode(_main._ticker.MODE_FULL, [token])
         print(f"[live] Subscribed {symbol} token={token} sl={sl_price}")
     except Exception as e:
         print(f"[live] Subscribe error {symbol}: {e}")
@@ -229,7 +319,7 @@ def resubscribe_all(ws):
     if _active_subs:
         tokens = list(_active_subs.keys())
         ws.subscribe(tokens)
-        ws.set_mode(ws.MODE_QUOTE, tokens)
+        ws.set_mode(ws.MODE_FULL, tokens)
         print(f"[live] Re-subscribed {len(tokens)} tokens after reconnect")
 
 
