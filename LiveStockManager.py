@@ -128,6 +128,12 @@ def _flush_tick_buffer():
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, rows)
             print(f"[raw_ticks] Flushed {len(rows)} ticks to DB")
+            import Main as _main
+            if _main._main_loop:
+                asyncio.run_coroutine_threadsafe(
+                    live_candle_manager.broadcast(json.dumps({"type": "tick_flush"})),
+                    _main._main_loop
+                )
         except Exception as e:
             print(f"[raw_ticks] Flush error: {e}")
 
@@ -396,7 +402,7 @@ def api_order_book_by_symbol():
     with _db() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT symbol, tick_time, buy_quantity, sell_quantity
+            SELECT symbol, tick_time, buy_quantity, sell_quantity, depth_json
             FROM raw_ticks
             WHERE DATE(tick_time) = DATE('now')
             ORDER BY symbol, tick_time
@@ -406,23 +412,36 @@ def api_order_book_by_symbol():
     buckets: dict = defaultdict(lambda: defaultdict(lambda: {"buy": [], "sell": []}))
     for r in rows:
         sym = r["symbol"]
-        t   = (r["tick_time"] or "")[:16]       # 'YYYY-MM-DDTHH:MM' or 'YYYY-MM-DD HH:MM'
+        t   = (r["tick_time"] or "")[:16]
         sep = "T" if "T" in t else " "
         if sep not in t:
             continue
-        time_part = t.split(sep)[1]             # 'HH:MM'
+        time_part = t.split(sep)[1]
         h, m = int(time_part[:2]), int(time_part[3:5])
         candle_time = f"{h:02d}:{(m // 5) * 5:02d}"
-        buckets[sym][candle_time]["buy"].append(r["buy_quantity"] or 0)
-        buckets[sym][candle_time]["sell"].append(r["sell_quantity"] or 0)
+
+        # Prefer top-level buy/sell qty; fall back to summing depth levels
+        bq = r["buy_quantity"]
+        sq = r["sell_quantity"]
+        if (bq is None or sq is None) and r["depth_json"]:
+            try:
+                depth = json.loads(r["depth_json"])
+                if bq is None:
+                    bq = sum(l.get("quantity", 0) for l in depth.get("buy", []))
+                if sq is None:
+                    sq = sum(l.get("quantity", 0) for l in depth.get("sell", []))
+            except Exception:
+                pass
+        buckets[sym][candle_time]["buy"].append(bq or 0)
+        buckets[sym][candle_time]["sell"].append(sq or 0)
 
     result = {}
     for sym, candles in buckets.items():
         result[sym] = [
             {
-                "candle_time":   ct,
-                "avg_buy_qty":   round(sum(v["buy"])  / len(v["buy"]),  0) if v["buy"]  else 0,
-                "avg_sell_qty":  round(sum(v["sell"]) / len(v["sell"]), 0) if v["sell"] else 0,
+                "candle_time":  ct,
+                "avg_buy_qty":  round(sum(v["buy"])  / len(v["buy"]),  0) if v["buy"]  else 0,
+                "avg_sell_qty": round(sum(v["sell"]) / len(v["sell"]), 0) if v["sell"] else 0,
             }
             for ct, v in sorted(candles.items())
         ]
@@ -547,18 +566,30 @@ function renderChart(id, data, valueKey, fmtFn) {
   }
 }
 
+async function loadOrderBook() {
+  try {
+    const obData = await fetch('/api/live-candles/order-book-by-symbol').then(r => r.json());
+    if (Object.keys(obData).length) {
+      renderChart('cv-buy',  obData, 'avg_buy_qty',  fmtVol);
+      renderChart('cv-sell', obData, 'avg_sell_qty', fmtVol);
+    }
+    document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('st').textContent = 'Load error: ' + e.message;
+  }
+}
+
 async function loadAll() {
   try {
     const [volData, obData] = await Promise.all([
       fetch('/api/live-candles/by-symbol').then(r => r.json()),
       fetch('/api/live-candles/order-book-by-symbol').then(r => r.json()),
     ]);
-
     if (Object.keys(volData).length)
-      renderChart('cv-vol',  volData, 'volume',       fmtVol);
+      renderChart('cv-vol',  volData, 'volume',      fmtVol);
     if (Object.keys(obData).length) {
-      renderChart('cv-buy',  obData,  'avg_buy_qty',  fmtVol);
-      renderChart('cv-sell', obData,  'avg_sell_qty', fmtVol);
+      renderChart('cv-buy',  obData, 'avg_buy_qty',  fmtVol);
+      renderChart('cv-sell', obData, 'avg_sell_qty', fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -570,7 +601,17 @@ const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
 ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live'; };
 ws.onclose = () => { document.getElementById('dot').classList.remove('live'); setInterval(loadAll, 30000); };
-ws.onmessage = () => loadAll();
+ws.onmessage = e => {
+  try {
+    const msg = JSON.parse(e.data);
+    // tick_flush → refresh order book charts; candle close → refresh all
+    if (msg.type === 'tick_flush') {
+      loadOrderBook();
+    } else {
+      loadAll();
+    }
+  } catch { loadAll(); }
+};
 
 loadAll();
 </script>
