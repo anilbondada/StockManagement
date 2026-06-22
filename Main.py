@@ -713,9 +713,6 @@ async def lifespan(_: FastAPI):
         _access_token = token
         print("Loaded valid access token from file.")
         start_ticker(_access_token)
-        import StockInPlay as _sip_mod
-        eb_resume()
-        _sip_mod.sip_resume()
     else:
         _access_token = None
         print(f"No valid token found. Login here:\n{get_login_url()}")
@@ -725,6 +722,10 @@ async def lifespan(_: FastAPI):
     init_sip_table()
     init_live_table()
     restore_subscriptions()   # rebuild _active_subs from DB after restart
+    if _access_token:
+        import StockInPlay as _sip_mod
+        eb_resume()
+        _sip_mod.sip_resume()
     eod_task = asyncio.create_task(_live_eod_cleanup())
     yield
     eod_task.cancel()
