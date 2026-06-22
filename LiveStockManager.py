@@ -372,6 +372,222 @@ async def live_candles_ws(ws: WebSocket):
         live_candle_manager.disconnect(ws)
 
 
+@router.get("/api/live-candles/by-symbol")
+def api_live_candles_by_symbol():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT symbol, candle_date, candle_time, volume, open, high, low, close, sl_breached
+            FROM live_candles
+            WHERE candle_date = DATE('now', '+5 hours 30 minutes')
+            ORDER BY symbol, candle_date, candle_time
+        """).fetchall()
+    grouped = {}
+    for r in rows:
+        sym = r["symbol"]
+        if sym not in grouped:
+            grouped[sym] = []
+        grouped[sym].append(dict(r))
+    return grouped
+
+
+@router.get("/volume-chart", response_class=HTMLResponse)
+def volume_chart_ui():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Volume Chart — Live Candles</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:24px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+    h1{font-size:1.25rem;color:#fff}
+    .meta{font-size:.8rem;color:#6b7280;margin-top:2px}
+    .dot{width:8px;height:8px;border-radius:50%;background:#4b5563;display:inline-block;margin-right:5px;vertical-align:middle}
+    .dot.live{background:#22c55e;animation:pulse 1.2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#2a2a3e;color:#9ca3af}
+    .btn:hover{background:#374151}
+    .charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:20px}
+    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:18px 20px}
+    .card.sl-breach{border-color:#7f1d1d}
+    .card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px}
+    .sym{font-size:1rem;font-weight:800;color:#fff}
+    .badge-breach{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.7rem;font-weight:700}
+    .badge-ok{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.7rem;font-weight:700}
+    .stats{display:flex;gap:16px;flex-wrap:wrap}
+    .stat{font-size:.75rem;color:#6b7280}.stat span{color:#d1d5db}
+    .chart-wrap{position:relative;height:200px}
+    .empty{text-align:center;padding:60px;color:#4b5563}
+  </style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>Volume — Live 5-Min Candles</h1>
+    <div class="meta"><span class="dot" id="dot"></span><span id="st">Loading...</span></div>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn" onclick="load()">Refresh</button>
+    <a href="/live-candles" class="btn" style="text-decoration:none;display:inline-flex;align-items:center">Candle View</a>
+  </div>
+</div>
+<div class="charts" id="charts"><div class="empty">Loading charts...</div></div>
+
+<script>
+const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
+let charts = {};
+
+function fmtVol(v){
+  if(!v) return '0';
+  if(v>=1e6) return (v/1e6).toFixed(2)+'M';
+  if(v>=1e3) return (v/1e3).toFixed(0)+'K';
+  return String(v);
+}
+
+function buildChart(sym, candles, idx) {
+  const labels = candles.map(c => c.candle_time);
+  const vols   = candles.map(c => c.volume || 0);
+  const hasBreached = candles.some(c => c.sl_breached);
+  const lastVol = vols[vols.length-1] || 0;
+  const maxVol  = Math.max(...vols);
+  const color   = COLORS[idx % COLORS.length];
+
+  const card = document.createElement('div');
+  card.className = 'card' + (hasBreached ? ' sl-breach' : '');
+  card.id = 'card-' + sym;
+  card.innerHTML = `
+    <div class="card-header">
+      <span class="sym">${sym}</span>
+      <div class="stats">
+        <span class="stat">Latest Vol <span>${fmtVol(lastVol)}</span></span>
+        <span class="stat">Peak <span>${fmtVol(maxVol)}</span></span>
+        <span class="stat">Candles <span>${candles.length}</span></span>
+      </div>
+      ${hasBreached ? '<span class="badge-breach">⚠ SL Breached</span>' : '<span class="badge-ok">Active</span>'}
+    </div>
+    <div class="chart-wrap"><canvas id="cv-${sym}"></canvas></div>`;
+  document.getElementById('charts').appendChild(card);
+
+  const ctx = document.getElementById('cv-' + sym).getContext('2d');
+  charts[sym] = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets:[{
+        label: 'Volume',
+        data: vols,
+        borderColor: color,
+        backgroundColor: color + '22',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options:{
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction:{ intersect:false, mode:'index' },
+      plugins:{
+        legend:{ display:false },
+        tooltip:{
+          callbacks:{
+            label: ctx => ' Vol: ' + fmtVol(ctx.parsed.y)
+          }
+        }
+      },
+      scales:{
+        x:{
+          ticks:{ color:'#6b7280', font:{size:10}, maxRotation:45 },
+          grid:{ color:'#1a1a2e' }
+        },
+        y:{
+          ticks:{
+            color:'#6b7280', font:{size:10},
+            callback: v => fmtVol(v)
+          },
+          grid:{ color:'#1a1a2e' }
+        }
+      }
+    }
+  });
+}
+
+function updateChart(sym, candles, idx) {
+  if (!charts[sym]) { buildChart(sym, candles, idx); return; }
+  const c = charts[sym];
+  c.data.labels = candles.map(r => r.candle_time);
+  c.data.datasets[0].data = candles.map(r => r.volume || 0);
+  c.update('none');
+  // update stats
+  const vols = candles.map(r => r.volume || 0);
+  const card = document.getElementById('card-' + sym);
+  if (card) {
+    card.querySelectorAll('.stat span')[0].textContent = fmtVol(vols[vols.length-1]||0);
+    card.querySelectorAll('.stat span')[1].textContent = fmtVol(Math.max(...vols));
+    card.querySelectorAll('.stat span')[2].textContent = candles.length;
+  }
+}
+
+async function load() {
+  try {
+    const data = await (await fetch('/api/live-candles/by-symbol')).json();
+    const syms = Object.keys(data).sort();
+    if (!syms.length) {
+      document.getElementById('charts').innerHTML = '<div class="empty">No candle data for today.</div>';
+      return;
+    }
+    if (!Object.keys(charts).length) {
+      document.getElementById('charts').innerHTML = '';
+    }
+    syms.forEach((sym, i) => updateChart(sym, data[sym], i));
+    document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('st').textContent = 'Load error: ' + e.message;
+  }
+}
+
+// WebSocket for live updates
+const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
+ws.onopen = () => {
+  document.getElementById('dot').classList.add('live');
+  document.getElementById('st').textContent = 'Live';
+};
+ws.onclose = () => {
+  document.getElementById('dot').classList.remove('live');
+  document.getElementById('st').textContent = 'Disconnected — polling every 30s';
+  setInterval(load, 30000);
+};
+ws.onmessage = e => {
+  const c = JSON.parse(e.data);
+  const sym = c.symbol;
+  // Update or append to the chart for this symbol
+  if (charts[sym]) {
+    const ch = charts[sym];
+    const labels = ch.data.labels;
+    const dpts   = ch.data.datasets[0].data;
+    const t = c.candle_time || c.start || '';
+    const idx = labels.indexOf(t);
+    if (idx >= 0) { dpts[idx] = c.volume || 0; }
+    else          { labels.push(t); dpts.push(c.volume || 0); }
+    ch.update('none');
+  } else {
+    load(); // new symbol appeared, reload all
+  }
+};
+
+load();
+</script>
+</body>
+</html>"""
+
+
 @router.get("/live-candles", response_class=HTMLResponse)
 def live_candles_ui():
     return """
