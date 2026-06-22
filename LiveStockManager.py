@@ -486,16 +486,16 @@ def volume_chart_ui():
   </div>
 </div>
 <div class="card">
-  <div class="card-title">Traded Volume</div>
-  <div class="chart-wrap"><canvas id="cv-vol"></canvas></div>
-</div>
-<div class="card">
   <div class="card-title">Avg Pending Buy Qty (Order Book)</div>
   <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
 </div>
 <div class="card">
   <div class="card-title">Avg Pending Sell Qty (Order Book)</div>
   <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
+</div>
+<div class="card">
+  <div class="card-title">Traded Volume</div>
+  <div class="chart-wrap"><canvas id="cv-vol"></canvas></div>
 </div>
 
 <script>
