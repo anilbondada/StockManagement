@@ -391,6 +391,44 @@ def api_live_candles_by_symbol():
     return grouped
 
 
+@router.get("/api/live-candles/order-book-by-symbol")
+def api_order_book_by_symbol():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT symbol, tick_time, buy_quantity, sell_quantity
+            FROM raw_ticks
+            WHERE DATE(tick_time) = DATE('now')
+            ORDER BY symbol, tick_time
+        """).fetchall()
+
+    from collections import defaultdict
+    buckets: dict = defaultdict(lambda: defaultdict(lambda: {"buy": [], "sell": []}))
+    for r in rows:
+        sym = r["symbol"]
+        t   = (r["tick_time"] or "")[:16]       # 'YYYY-MM-DDTHH:MM' or 'YYYY-MM-DD HH:MM'
+        sep = "T" if "T" in t else " "
+        if sep not in t:
+            continue
+        time_part = t.split(sep)[1]             # 'HH:MM'
+        h, m = int(time_part[:2]), int(time_part[3:5])
+        candle_time = f"{h:02d}:{(m // 5) * 5:02d}"
+        buckets[sym][candle_time]["buy"].append(r["buy_quantity"] or 0)
+        buckets[sym][candle_time]["sell"].append(r["sell_quantity"] or 0)
+
+    result = {}
+    for sym, candles in buckets.items():
+        result[sym] = [
+            {
+                "candle_time":   ct,
+                "avg_buy_qty":   round(sum(v["buy"])  / len(v["buy"]),  0) if v["buy"]  else 0,
+                "avg_sell_qty":  round(sum(v["sell"]) / len(v["sell"]), 0) if v["sell"] else 0,
+            }
+            for ct, v in sorted(candles.items())
+        ]
+    return result
+
+
 @router.get("/volume-chart", response_class=HTMLResponse)
 def volume_chart_ui():
     return """<!DOCTYPE html>
@@ -411,47 +449,57 @@ def volume_chart_ui():
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#2a2a3e;color:#9ca3af}
     .btn:hover{background:#374151}
-    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:20px}
-    .chart-wrap{position:relative;height:420px}
+    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:20px;margin-bottom:20px}
+    .card-title{font-size:.9rem;font-weight:700;color:#9ca3af;margin-bottom:14px;text-transform:uppercase;letter-spacing:.05em}
+    .chart-wrap{position:relative;height:380px}
     .empty{text-align:center;padding:80px;color:#4b5563}
   </style>
 </head>
 <body>
 <div class="header">
   <div>
-    <h1>Volume — Live 5-Min Candles</h1>
+    <h1>Live 5-Min Charts</h1>
     <div class="meta"><span class="dot" id="dot"></span><span id="st">Loading...</span></div>
   </div>
   <div style="display:flex;gap:8px">
-    <button class="btn" onclick="load()">Refresh</button>
+    <button class="btn" onclick="loadAll()">Refresh</button>
     <a href="/live-candles" class="btn" style="text-decoration:none;display:inline-flex;align-items:center">Candle View</a>
   </div>
 </div>
 <div class="card">
-  <div class="chart-wrap"><canvas id="cv"></canvas></div>
+  <div class="card-title">Traded Volume</div>
+  <div class="chart-wrap"><canvas id="cv-vol"></canvas></div>
+</div>
+<div class="card">
+  <div class="card-title">Avg Pending Buy Qty (Order Book)</div>
+  <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
+</div>
+<div class="card">
+  <div class="card-title">Avg Pending Sell Qty (Order Book)</div>
+  <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
 </div>
 
 <script>
 const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
-let chart = null;
+const charts = {};
 
 function fmtVol(v){
   if(v==null||v===0) return '0';
   if(v>=1e6) return (v/1e6).toFixed(2)+'M';
   if(v>=1e3) return (v/1e3).toFixed(0)+'K';
-  return String(v);
+  return String(Math.round(v));
 }
 
-function buildDatasets(data) {
-  const syms = Object.keys(data).sort();
-  // Union of all candle times, sorted
+function makeLabels(data, candleKey) {
   const timeSet = new Set();
-  syms.forEach(s => data[s].forEach(c => timeSet.add(c.candle_time)));
-  const labels = Array.from(timeSet).sort();
+  Object.values(data).forEach(arr => arr.forEach(c => timeSet.add(c[candleKey])));
+  return Array.from(timeSet).sort();
+}
 
-  const datasets = syms.map((sym, i) => {
+function makeDatasets(data, labels, valueKey) {
+  return Object.keys(data).sort().map((sym, i) => {
     const byTime = {};
-    data[sym].forEach(c => byTime[c.candle_time] = c.volume || 0);
+    data[sym].forEach(c => byTime[c.candle_time] = c[valueKey] ?? null);
     return {
       label: sym,
       data: labels.map(t => byTime[t] ?? null),
@@ -464,73 +512,67 @@ function buildDatasets(data) {
       spanGaps: false,
     };
   });
-  return { labels, datasets };
 }
 
-function renderChart(data) {
-  const { labels, datasets } = buildDatasets(data);
-  if (!chart) {
-    const ctx = document.getElementById('cv').getContext('2d');
-    chart = new Chart(ctx, {
+function chartOptions(fmtFn) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { intersect: false, mode: 'index' },
+    plugins: {
+      legend: { display: true, position: 'top',
+        labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14, padding: 16 } },
+      tooltip: { callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmtFn(ctx.parsed.y) } }
+    },
+    scales: {
+      x: { ticks: { color: '#6b7280', font: { size: 10 }, maxRotation: 45 }, grid: { color: '#1a1a2e' } },
+      y: { ticks: { color: '#6b7280', font: { size: 10 }, callback: v => fmtFn(v) }, grid: { color: '#1a1a2e' } }
+    }
+  };
+}
+
+function renderChart(id, data, valueKey, fmtFn) {
+  const labels   = makeLabels(data, 'candle_time');
+  const datasets = makeDatasets(data, labels, valueKey);
+  if (!charts[id]) {
+    charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
       type: 'line',
       data: { labels, datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { intersect: false, mode: 'index' },
-        plugins: {
-          legend: {
-            display: true,
-            position: 'top',
-            labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14, padding: 16 }
-          },
-          tooltip: {
-            callbacks: {
-              label: ctx => ' ' + ctx.dataset.label + ': ' + fmtVol(ctx.parsed.y)
-            }
-          }
-        },
-        scales: {
-          x: {
-            ticks: { color: '#6b7280', font: { size: 10 }, maxRotation: 45 },
-            grid:  { color: '#1a1a2e' }
-          },
-          y: {
-            ticks: { color: '#6b7280', font: { size: 10 }, callback: v => fmtVol(v) },
-            grid:  { color: '#1a1a2e' }
-          }
-        }
-      }
+      options: chartOptions(fmtFn),
     });
   } else {
-    chart.data.labels = labels;
-    chart.data.datasets = datasets;
-    chart.update('none');
+    charts[id].data.labels   = labels;
+    charts[id].data.datasets = datasets;
+    charts[id].update('none');
   }
 }
 
-async function load() {
+async function loadAll() {
   try {
-    const data = await (await fetch('/api/live-candles/by-symbol')).json();
-    if (!Object.keys(data).length) {
-      document.getElementById('cv').closest('.card').innerHTML = '<div class="empty">No candle data for today.</div>';
-      return;
+    const [volData, obData] = await Promise.all([
+      fetch('/api/live-candles/by-symbol').then(r => r.json()),
+      fetch('/api/live-candles/order-book-by-symbol').then(r => r.json()),
+    ]);
+
+    if (Object.keys(volData).length)
+      renderChart('cv-vol',  volData, 'volume',       fmtVol);
+    if (Object.keys(obData).length) {
+      renderChart('cv-buy',  obData,  'avg_buy_qty',  fmtVol);
+      renderChart('cv-sell', obData,  'avg_sell_qty', fmtVol);
     }
-    renderChart(data);
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('st').textContent = 'Load error: ' + e.message;
   }
 }
 
-// WebSocket — on each new candle reload the full dataset to keep labels in sync
 const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
 ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live'; };
-ws.onclose = () => { document.getElementById('dot').classList.remove('live'); setInterval(load, 30000); };
-ws.onmessage = () => load();
+ws.onclose = () => { document.getElementById('dot').classList.remove('live'); setInterval(loadAll, 30000); };
+ws.onmessage = () => loadAll();
 
-load();
+loadAll();
 </script>
 </body>
 </html>"""
