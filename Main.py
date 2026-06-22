@@ -389,10 +389,12 @@ def _fetch_complete_candle(data: dict):
             is_webhook = row and row[1] == 1
 
             kite = get_kite()
-            ts   = data.get("exchange_timestamp") or data.get("order_timestamp") or ""
 
-            # Parse execution time (Kite timestamps are in IST)
-            exec_dt = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S")
+            # Use server receipt time as fill time — Kite's order_timestamp/exchange_timestamp
+            # reflect when the order was PLACED, not when a limit order was actually filled.
+            # The postback fires in real-time on fill, so now() is the correct reference.
+            ist_tz  = _tz(_td(hours=5, minutes=30))
+            exec_dt = datetime.now(ist_tz).replace(tzinfo=None)
 
             # Round down to current 5-min candle start and end
             candle_min   = (exec_dt.minute // 5) * 5
