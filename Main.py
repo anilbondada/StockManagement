@@ -463,19 +463,36 @@ def _fetch_complete_candle(data: dict):
                     print(f"[sip-sl] {symbol}: SL-BUY order_id={sl_buy_id} trigger={sl_buy_trigger} (day_high={day_high})")
                     sl_sell_trigger = round(c["low"] - 1,   2)
                     sl_sell_limit   = round(c["low"] - 1.5, 2)
-                    sl_sell_id      = kite.place_order(
-                        variety          = kite.VARIETY_REGULAR,
-                        exchange         = "NSE",
-                        tradingsymbol    = symbol,
-                        transaction_type = "SELL",
-                        quantity         = quantity,
-                        product          = "MIS",
-                        order_type       = "SL",
-                        validity         = "DAY",
-                        price            = sl_sell_limit,
-                        trigger_price    = sl_sell_trigger,
-                    )
-                    print(f"[sip-sl] {symbol}: SL-SELL order_id={sl_sell_id} trigger={sl_sell_trigger} limit={sl_sell_limit} (candle_low={c['low']})")
+                    try:
+                        current_ltp = kite.quote(f"NSE:{symbol}")[f"NSE:{symbol}"]["last_price"]
+                    except Exception:
+                        current_ltp = sl_sell_trigger + 1
+                    if current_ltp < sl_sell_trigger:
+                        sl_sell_id = kite.place_order(
+                            variety          = kite.VARIETY_REGULAR,
+                            exchange         = "NSE",
+                            tradingsymbol    = symbol,
+                            transaction_type = "SELL",
+                            quantity         = quantity,
+                            product          = "MIS",
+                            order_type       = "MARKET",
+                            validity         = "DAY",
+                        )
+                        print(f"[sip-sl] {symbol}: MARKET SELL order_id={sl_sell_id} ltp={current_ltp} < trigger={sl_sell_trigger} (candle_low={c['low']})")
+                    else:
+                        sl_sell_id = kite.place_order(
+                            variety          = kite.VARIETY_REGULAR,
+                            exchange         = "NSE",
+                            tradingsymbol    = symbol,
+                            transaction_type = "SELL",
+                            quantity         = quantity,
+                            product          = "MIS",
+                            order_type       = "SL",
+                            validity         = "DAY",
+                            price            = sl_sell_limit,
+                            trigger_price    = sl_sell_trigger,
+                        )
+                        print(f"[sip-sl] {symbol}: SL-SELL order_id={sl_sell_id} trigger={sl_sell_trigger} limit={sl_sell_limit} (candle_low={c['low']})")
                     now_ts = datetime.now(timezone.utc).isoformat()
                     with _db() as conn:
                         conn.execute(
