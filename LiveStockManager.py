@@ -411,17 +411,9 @@ def volume_chart_ui():
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#2a2a3e;color:#9ca3af}
     .btn:hover{background:#374151}
-    .charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:20px}
-    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:18px 20px}
-    .card.sl-breach{border-color:#7f1d1d}
-    .card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px}
-    .sym{font-size:1rem;font-weight:800;color:#fff}
-    .badge-breach{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.7rem;font-weight:700}
-    .badge-ok{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.7rem;font-weight:700}
-    .stats{display:flex;gap:16px;flex-wrap:wrap}
-    .stat{font-size:.75rem;color:#6b7280}.stat span{color:#d1d5db}
-    .chart-wrap{position:relative;height:200px}
-    .empty{text-align:center;padding:60px;color:#4b5563}
+    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:20px}
+    .chart-wrap{position:relative;height:420px}
+    .empty{text-align:center;padding:80px;color:#4b5563}
   </style>
 </head>
 <body>
@@ -435,152 +427,108 @@ def volume_chart_ui():
     <a href="/live-candles" class="btn" style="text-decoration:none;display:inline-flex;align-items:center">Candle View</a>
   </div>
 </div>
-<div class="charts" id="charts"><div class="empty">Loading charts...</div></div>
+<div class="card">
+  <div class="chart-wrap"><canvas id="cv"></canvas></div>
+</div>
 
 <script>
 const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
-let charts = {};
+let chart = null;
 
 function fmtVol(v){
-  if(!v) return '0';
+  if(v==null||v===0) return '0';
   if(v>=1e6) return (v/1e6).toFixed(2)+'M';
   if(v>=1e3) return (v/1e3).toFixed(0)+'K';
   return String(v);
 }
 
-function buildChart(sym, candles, idx) {
-  const labels = candles.map(c => c.candle_time);
-  const vols   = candles.map(c => c.volume || 0);
-  const hasBreached = candles.some(c => c.sl_breached);
-  const lastVol = vols[vols.length-1] || 0;
-  const maxVol  = Math.max(...vols);
-  const color   = COLORS[idx % COLORS.length];
+function buildDatasets(data) {
+  const syms = Object.keys(data).sort();
+  // Union of all candle times, sorted
+  const timeSet = new Set();
+  syms.forEach(s => data[s].forEach(c => timeSet.add(c.candle_time)));
+  const labels = Array.from(timeSet).sort();
 
-  const card = document.createElement('div');
-  card.className = 'card' + (hasBreached ? ' sl-breach' : '');
-  card.id = 'card-' + sym;
-  card.innerHTML = `
-    <div class="card-header">
-      <span class="sym">${sym}</span>
-      <div class="stats">
-        <span class="stat">Latest Vol <span>${fmtVol(lastVol)}</span></span>
-        <span class="stat">Peak <span>${fmtVol(maxVol)}</span></span>
-        <span class="stat">Candles <span>${candles.length}</span></span>
-      </div>
-      ${hasBreached ? '<span class="badge-breach">⚠ SL Breached</span>' : '<span class="badge-ok">Active</span>'}
-    </div>
-    <div class="chart-wrap"><canvas id="cv-${sym}"></canvas></div>`;
-  document.getElementById('charts').appendChild(card);
-
-  const ctx = document.getElementById('cv-' + sym).getContext('2d');
-  charts[sym] = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets:[{
-        label: 'Volume',
-        data: vols,
-        borderColor: color,
-        backgroundColor: color + '22',
-        borderWidth: 2,
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        fill: true,
-        tension: 0.3,
-      }]
-    },
-    options:{
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction:{ intersect:false, mode:'index' },
-      plugins:{
-        legend:{ display:false },
-        tooltip:{
-          callbacks:{
-            label: ctx => ' Vol: ' + fmtVol(ctx.parsed.y)
-          }
-        }
-      },
-      scales:{
-        x:{
-          ticks:{ color:'#6b7280', font:{size:10}, maxRotation:45 },
-          grid:{ color:'#1a1a2e' }
-        },
-        y:{
-          ticks:{
-            color:'#6b7280', font:{size:10},
-            callback: v => fmtVol(v)
-          },
-          grid:{ color:'#1a1a2e' }
-        }
-      }
-    }
+  const datasets = syms.map((sym, i) => {
+    const byTime = {};
+    data[sym].forEach(c => byTime[c.candle_time] = c.volume || 0);
+    return {
+      label: sym,
+      data: labels.map(t => byTime[t] ?? null),
+      borderColor: COLORS[i % COLORS.length],
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      tension: 0.3,
+      spanGaps: false,
+    };
   });
+  return { labels, datasets };
 }
 
-function updateChart(sym, candles, idx) {
-  if (!charts[sym]) { buildChart(sym, candles, idx); return; }
-  const c = charts[sym];
-  c.data.labels = candles.map(r => r.candle_time);
-  c.data.datasets[0].data = candles.map(r => r.volume || 0);
-  c.update('none');
-  // update stats
-  const vols = candles.map(r => r.volume || 0);
-  const card = document.getElementById('card-' + sym);
-  if (card) {
-    card.querySelectorAll('.stat span')[0].textContent = fmtVol(vols[vols.length-1]||0);
-    card.querySelectorAll('.stat span')[1].textContent = fmtVol(Math.max(...vols));
-    card.querySelectorAll('.stat span')[2].textContent = candles.length;
+function renderChart(data) {
+  const { labels, datasets } = buildDatasets(data);
+  if (!chart) {
+    const ctx = document.getElementById('cv').getContext('2d');
+    chart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { intersect: false, mode: 'index' },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'top',
+            labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14, padding: 16 }
+          },
+          tooltip: {
+            callbacks: {
+              label: ctx => ' ' + ctx.dataset.label + ': ' + fmtVol(ctx.parsed.y)
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#6b7280', font: { size: 10 }, maxRotation: 45 },
+            grid:  { color: '#1a1a2e' }
+          },
+          y: {
+            ticks: { color: '#6b7280', font: { size: 10 }, callback: v => fmtVol(v) },
+            grid:  { color: '#1a1a2e' }
+          }
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets = datasets;
+    chart.update('none');
   }
 }
 
 async function load() {
   try {
     const data = await (await fetch('/api/live-candles/by-symbol')).json();
-    const syms = Object.keys(data).sort();
-    if (!syms.length) {
-      document.getElementById('charts').innerHTML = '<div class="empty">No candle data for today.</div>';
+    if (!Object.keys(data).length) {
+      document.getElementById('cv').closest('.card').innerHTML = '<div class="empty">No candle data for today.</div>';
       return;
     }
-    if (!Object.keys(charts).length) {
-      document.getElementById('charts').innerHTML = '';
-    }
-    syms.forEach((sym, i) => updateChart(sym, data[sym], i));
+    renderChart(data);
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('st').textContent = 'Load error: ' + e.message;
   }
 }
 
-// WebSocket for live updates
+// WebSocket — on each new candle reload the full dataset to keep labels in sync
 const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
-ws.onopen = () => {
-  document.getElementById('dot').classList.add('live');
-  document.getElementById('st').textContent = 'Live';
-};
-ws.onclose = () => {
-  document.getElementById('dot').classList.remove('live');
-  document.getElementById('st').textContent = 'Disconnected — polling every 30s';
-  setInterval(load, 30000);
-};
-ws.onmessage = e => {
-  const c = JSON.parse(e.data);
-  const sym = c.symbol;
-  // Update or append to the chart for this symbol
-  if (charts[sym]) {
-    const ch = charts[sym];
-    const labels = ch.data.labels;
-    const dpts   = ch.data.datasets[0].data;
-    const t = c.candle_time || c.start || '';
-    const idx = labels.indexOf(t);
-    if (idx >= 0) { dpts[idx] = c.volume || 0; }
-    else          { labels.push(t); dpts.push(c.volume || 0); }
-    ch.update('none');
-  } else {
-    load(); // new symbol appeared, reload all
-  }
-};
+ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live'; };
+ws.onclose = () => { document.getElementById('dot').classList.remove('live'); setInterval(load, 30000); };
+ws.onmessage = () => load();
 
 load();
 </script>
