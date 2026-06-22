@@ -713,6 +713,9 @@ async def lifespan(_: FastAPI):
         _access_token = token
         print("Loaded valid access token from file.")
         start_ticker(_access_token)
+        import StockInPlay as _sip_mod
+        eb_resume()
+        _sip_mod.sip_resume()
     else:
         _access_token = None
         print(f"No valid token found. Login here:\n{get_login_url()}")
