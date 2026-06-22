@@ -379,7 +379,7 @@ def api_live_candles_by_symbol():
         rows = conn.execute("""
             SELECT symbol, candle_date, candle_time, volume, open, high, low, close, sl_breached
             FROM live_candles
-            WHERE candle_date = DATE('now', '+5 hours 30 minutes')
+            WHERE candle_date = DATE('now')
             ORDER BY symbol, candle_date, candle_time
         """).fetchall()
     grouped = {}
