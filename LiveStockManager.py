@@ -402,14 +402,16 @@ def api_order_book_by_symbol():
     with _db() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT symbol, tick_time, buy_quantity, sell_quantity, depth_json
+            SELECT symbol, tick_time, last_price, last_quantity, depth_json
             FROM raw_ticks
             WHERE DATE(tick_time) = DATE('now')
             ORDER BY symbol, tick_time
         """).fetchall()
 
     from collections import defaultdict
-    buckets: dict = defaultdict(lambda: defaultdict(lambda: {"buy": [], "sell": []}))
+    buckets: dict = defaultdict(lambda: defaultdict(lambda: {
+        "agg_buy_vol": 0, "agg_sell_vol": 0, "last_depth": None
+    }))
     for r in rows:
         sym = r["symbol"]
         t   = (r["tick_time"] or "")[:16]
@@ -420,28 +422,38 @@ def api_order_book_by_symbol():
         h, m = int(time_part[:2]), int(time_part[3:5])
         candle_time = f"{h:02d}:{(m // 5) * 5:02d}"
 
-        # Prefer top-level buy/sell qty; fall back to summing depth levels
-        bq = r["buy_quantity"]
-        sq = r["sell_quantity"]
-        if (bq is None or sq is None) and r["depth_json"]:
+        lp = r["last_price"]
+        lq = r["last_quantity"] or 0
+        depth = None
+        if r["depth_json"]:
             try:
                 depth = json.loads(r["depth_json"])
-                if bq is None:
-                    bq = sum(l.get("quantity", 0) for l in depth.get("buy", []))
-                if sq is None:
-                    sq = sum(l.get("quantity", 0) for l in depth.get("sell", []))
             except Exception:
                 pass
-        buckets[sym][candle_time]["buy"].append(bq or 0)
-        buckets[sym][candle_time]["sell"].append(sq or 0)
+
+        bucket = buckets[sym][candle_time]
+        if depth and lp and lq:
+            buy_lvls  = depth.get("buy", [])
+            sell_lvls = depth.get("sell", [])
+            best_bid  = buy_lvls[0]["price"]  if buy_lvls  else None
+            best_ask  = sell_lvls[0]["price"] if sell_lvls else None
+            # Aggressive buy: trade at or above best ask (buyer hit the offer)
+            if best_ask is not None and lp >= best_ask:
+                bucket["agg_buy_vol"] += lq
+            # Aggressive sell: trade at or below best bid (seller hit the bid)
+            elif best_bid is not None and lp <= best_bid:
+                bucket["agg_sell_vol"] += lq
+        if depth:
+            bucket["last_depth"] = depth
 
     result = {}
     for sym, candles in buckets.items():
         result[sym] = [
             {
                 "candle_time":  ct,
-                "avg_buy_qty":  round(sum(v["buy"])  / len(v["buy"]),  0) if v["buy"]  else 0,
-                "avg_sell_qty": round(sum(v["sell"]) / len(v["sell"]), 0) if v["sell"] else 0,
+                "agg_buy_vol":  v["agg_buy_vol"],
+                "agg_sell_vol": v["agg_sell_vol"],
+                "depth":        v["last_depth"],
             }
             for ct, v in sorted(candles.items())
         ]
@@ -470,8 +482,35 @@ def volume_chart_ui():
     .btn:hover{background:#374151}
     .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:20px;margin-bottom:20px}
     .card-title{font-size:.9rem;font-weight:700;color:#9ca3af;margin-bottom:14px;text-transform:uppercase;letter-spacing:.05em}
-    .chart-wrap{position:relative;height:380px}
+    .chart-wrap{position:relative;height:320px;cursor:pointer}
     .empty{text-align:center;padding:80px;color:#4b5563}
+    /* Depth detail panel */
+    #depth-panel{display:none;background:#1e1e2e;border:1px solid #374151;border-radius:12px;padding:18px;margin-bottom:20px}
+    #depth-panel.visible{display:block}
+    .dp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+    .dp-title{font-size:.95rem;font-weight:700;color:#fff}
+    .dp-meta{font-size:.8rem;color:#6b7280}
+    .dp-close{background:none;border:none;color:#6b7280;font-size:1.1rem;cursor:pointer;padding:2px 6px}
+    .dp-close:hover{color:#fff}
+    .dp-body{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .dp-section-title{font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+    .dp-section-title.bid{color:#34d399}
+    .dp-section-title.ask{color:#f87171}
+    .dp-table{width:100%;border-collapse:collapse;font-size:.78rem}
+    .dp-table th{color:#6b7280;font-weight:600;padding:4px 8px;text-align:right;border-bottom:1px solid #2a2a3e}
+    .dp-table th:first-child{text-align:left}
+    .dp-table td{padding:4px 8px;text-align:right;border-bottom:1px solid #1a1a2e}
+    .dp-table td:first-child{text-align:left}
+    .dp-table tr:last-child td{border-bottom:none}
+    .dp-table .bid-price{color:#34d399}
+    .dp-table .ask-price{color:#f87171}
+    .dp-summary{margin-top:14px;display:flex;gap:24px;flex-wrap:wrap;padding-top:12px;border-top:1px solid #2a2a3e}
+    .dp-stat{display:flex;flex-direction:column;gap:2px}
+    .dp-stat-label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
+    .dp-stat-value{font-size:.95rem;font-weight:700}
+    .dp-stat-value.green{color:#34d399}
+    .dp-stat-value.red{color:#f87171}
+    .dp-stat-value.blue{color:#818cf8}
   </style>
 </head>
 <body>
@@ -485,12 +524,47 @@ def volume_chart_ui():
     <a href="/live-candles" class="btn" style="text-decoration:none;display:inline-flex;align-items:center">Candle View</a>
   </div>
 </div>
+
+<!-- Depth detail panel (shown on click) -->
+<div id="depth-panel">
+  <div class="dp-header">
+    <div>
+      <div class="dp-title" id="dp-title">—</div>
+      <div class="dp-meta" id="dp-meta">Click any chart point to see order book snapshot</div>
+    </div>
+    <button class="dp-close" onclick="closeDepth()">✕</button>
+  </div>
+  <div class="dp-body">
+    <div>
+      <div class="dp-section-title bid">Bid (Buy orders)</div>
+      <table class="dp-table">
+        <thead><tr><th>Price</th><th>Qty</th><th>Orders</th></tr></thead>
+        <tbody id="dp-bid"></tbody>
+      </table>
+    </div>
+    <div>
+      <div class="dp-section-title ask">Ask (Sell orders)</div>
+      <table class="dp-table">
+        <thead><tr><th>Price</th><th>Qty</th><th>Orders</th></tr></thead>
+        <tbody id="dp-ask"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="dp-summary">
+    <div class="dp-stat"><span class="dp-stat-label">Total Bid Qty</span><span class="dp-stat-value green" id="dp-bid-total">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Total Ask Qty</span><span class="dp-stat-value red" id="dp-ask-total">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Agg Buy Vol</span><span class="dp-stat-value green" id="dp-agg-buy">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Agg Sell Vol</span><span class="dp-stat-value red" id="dp-agg-sell">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Traded Volume</span><span class="dp-stat-value blue" id="dp-vol">—</span></div>
+  </div>
+</div>
+
 <div class="card">
-  <div class="card-title">Avg Pending Buy Qty (Order Book)</div>
+  <div class="card-title">Aggressive Buy Volume (Market Orders Hitting Ask)</div>
   <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
 </div>
 <div class="card">
-  <div class="card-title">Avg Pending Sell Qty (Order Book)</div>
+  <div class="card-title">Aggressive Sell Volume (Market Orders Hitting Bid)</div>
   <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
 </div>
 <div class="card">
@@ -501,6 +575,8 @@ def volume_chart_ui():
 <script>
 const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
 const charts = {};
+let _obData  = {};   // latest order book data, keyed by symbol
+let _volData = {};   // latest traded volume data, keyed by symbol
 
 function fmtVol(v){
   if(v==null||v===0) return '0';
@@ -526,7 +602,7 @@ function makeDatasets(data, labels, valueKey) {
       backgroundColor: 'transparent',
       borderWidth: 2,
       pointRadius: 3,
-      pointHoverRadius: 5,
+      pointHoverRadius: 6,
       tension: 0.3,
       spanGaps: false,
     };
@@ -546,6 +622,15 @@ function chartOptions(fmtFn) {
     scales: {
       x: { ticks: { color: '#6b7280', font: { size: 10 }, maxRotation: 45 }, grid: { color: '#1a1a2e' } },
       y: { ticks: { color: '#6b7280', font: { size: 10 }, callback: v => fmtFn(v) }, grid: { color: '#1a1a2e' } }
+    },
+    onClick(evt, active) {
+      if (!active.length) return;
+      const idx     = active[0].index;
+      const dsIdx   = active[0].datasetIndex;
+      const chart   = active[0].chart;
+      const time    = chart.data.labels[idx];
+      const sym     = chart.data.datasets[dsIdx].label;
+      showDepth(sym, time);
     }
   };
 }
@@ -566,12 +651,56 @@ function renderChart(id, data, valueKey, fmtFn) {
   }
 }
 
+function showDepth(sym, time) {
+  const candles = _obData[sym] || [];
+  const candle  = candles.find(c => c.candle_time === time);
+  const volCandles = _volData[sym] || [];
+  const volCandle  = volCandles.find(c => c.candle_time === time);
+  const vol = volCandle ? volCandle.volume : null;
+
+  document.getElementById('dp-title').textContent = sym + '  —  ' + time;
+  document.getElementById('dp-meta').textContent  = 'Order book snapshot at candle close · click another point to update';
+
+  const depth = candle && candle.depth ? candle.depth : null;
+  const bidLevels  = depth ? (depth.buy  || []) : [];
+  const askLevels  = depth ? (depth.sell || []) : [];
+
+  const bidTotal = bidLevels.reduce((s, l) => s + (l.quantity || 0), 0);
+  const askTotal = askLevels.reduce((s, l) => s + (l.quantity || 0), 0);
+
+  function buildRows(levels, cls) {
+    if (!levels.length) return '<tr><td colspan="3" style="color:#4b5563;text-align:center">No data</td></tr>';
+    return levels.map(l =>
+      '<tr><td class="' + cls + '">' + l.price.toFixed(2) + '</td>' +
+      '<td>' + fmtVol(l.quantity) + '</td>' +
+      '<td>' + (l.orders || 0) + '</td></tr>'
+    ).join('');
+  }
+
+  document.getElementById('dp-bid').innerHTML     = buildRows(bidLevels, 'bid-price');
+  document.getElementById('dp-ask').innerHTML     = buildRows(askLevels, 'ask-price');
+  document.getElementById('dp-bid-total').textContent = fmtVol(bidTotal);
+  document.getElementById('dp-ask-total').textContent = fmtVol(askTotal);
+  document.getElementById('dp-agg-buy').textContent  = candle ? fmtVol(candle.agg_buy_vol)  : '—';
+  document.getElementById('dp-agg-sell').textContent = candle ? fmtVol(candle.agg_sell_vol) : '—';
+  document.getElementById('dp-vol').textContent       = vol != null ? fmtVol(vol) : '—';
+
+  const panel = document.getElementById('depth-panel');
+  panel.classList.add('visible');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeDepth() {
+  document.getElementById('depth-panel').classList.remove('visible');
+}
+
 async function loadOrderBook() {
   try {
     const obData = await fetch('/api/live-candles/order-book-by-symbol').then(r => r.json());
+    _obData = obData;
     if (Object.keys(obData).length) {
-      renderChart('cv-buy',  obData, 'avg_buy_qty',  fmtVol);
-      renderChart('cv-sell', obData, 'avg_sell_qty', fmtVol);
+      renderChart('cv-buy',  obData, 'agg_buy_vol',  fmtVol);
+      renderChart('cv-sell', obData, 'agg_sell_vol', fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -585,11 +714,13 @@ async function loadAll() {
       fetch('/api/live-candles/by-symbol').then(r => r.json()),
       fetch('/api/live-candles/order-book-by-symbol').then(r => r.json()),
     ]);
+    _volData = volData;
+    _obData  = obData;
     if (Object.keys(volData).length)
       renderChart('cv-vol',  volData, 'volume',      fmtVol);
     if (Object.keys(obData).length) {
-      renderChart('cv-buy',  obData, 'avg_buy_qty',  fmtVol);
-      renderChart('cv-sell', obData, 'avg_sell_qty', fmtVol);
+      renderChart('cv-buy',  obData, 'agg_buy_vol',  fmtVol);
+      renderChart('cv-sell', obData, 'agg_sell_vol', fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -604,12 +735,8 @@ ws.onclose = () => { document.getElementById('dot').classList.remove('live'); se
 ws.onmessage = e => {
   try {
     const msg = JSON.parse(e.data);
-    // tick_flush → refresh order book charts; candle close → refresh all
-    if (msg.type === 'tick_flush') {
-      loadOrderBook();
-    } else {
-      loadAll();
-    }
+    if (msg.type === 'tick_flush') { loadOrderBook(); }
+    else { loadAll(); }
   } catch { loadAll(); }
 };
 
