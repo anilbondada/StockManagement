@@ -396,16 +396,10 @@ def _fetch_complete_candle(data: dict):
             ist_tz  = _tz(_td(hours=5, minutes=30))
             exec_dt = datetime.now(ist_tz).replace(tzinfo=None)
 
-            # Round down to current 5-min candle start and end
+            # Round down to the 5-min candle that contains exec_dt, then wait for it to close
             candle_min   = (exec_dt.minute // 5) * 5
             candle_start = exec_dt.replace(minute=candle_min, second=0, microsecond=0)
             candle_end   = candle_start + _td(minutes=5)
-
-            # If fill is mid-candle (not at exact candle boundary), skip to the next candle
-            # so SL high/low are based purely on post-fill price action, not pre-fill data
-            if exec_dt > candle_start:
-                candle_start = candle_end
-                candle_end   = candle_start + _td(minutes=5)
 
             # Wait until the 5-min candle closes (+10s buffer for data availability)
             now_ist   = datetime.now(_tz(_td(hours=5, minutes=30))).replace(tzinfo=None)
