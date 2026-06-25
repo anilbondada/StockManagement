@@ -695,9 +695,11 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
     # After all candles saved, place orders (time-gated to before 10:00 AM IST unless skip_time_gate)
     try:
         from datetime import timezone as tz
-        ist_now = datetime.now(tz(timedelta(hours=5, minutes=30)))
-        cutoff_hour = int(get_config().get("eb_webhook_cutoff_hour", 10))
-        if skip_time_gate or ist_now.hour < cutoff_hour:
+        ist_now     = datetime.now(tz(timedelta(hours=5, minutes=30)))
+        _co_cfg     = get_config().get("eb_webhook_cutoff_time", "09:40")
+        _co_h, _co_m = (int(x) for x in _co_cfg.split(":"))
+        cutoff      = ist_now.replace(hour=_co_h, minute=_co_m, second=0, microsecond=0)
+        if skip_time_gate or ist_now < cutoff:
             with _db() as conn:
                 order_rows = conn.execute("""
                     SELECT alert_id, symbol, high, pct_change FROM stocks_fetched_info
@@ -707,7 +709,7 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
                 result = _run_auto_orders(kite, order_rows)
                 print(f"[auto-order] alert_id={alert_id}: placed={len(result['placed'])} skipped={len(result['skipped'])} errors={len(result['errors'])}")
         else:
-            print(f"[auto-order] alert_id={alert_id}: skipped — current IST time {ist_now.strftime('%H:%M')} >= {cutoff_hour}:00")
+            print(f"[auto-order] alert_id={alert_id}: skipped — current IST time {ist_now.strftime('%H:%M')} >= {_co_cfg}")
     except Exception as e:
         print(f"[auto-order] alert_id={alert_id}: ERROR {e}")
 
@@ -2747,11 +2749,13 @@ async def earlybloom_webhook(payload: dict):
     if _paused:
         print("[webhook] System is PAUSED — alert received but ignored.")
         return {"received": False, "reason": "system_paused"}
-    ist_now     = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    cutoff_hour = int(get_config().get("eb_webhook_cutoff_hour", 10))
-    if ist_now.hour >= cutoff_hour:
-        print(f"[webhook] EarlyBloom ignored — after {cutoff_hour}:00 IST")
-        return {"received": False, "reason": f"after_cutoff ({cutoff_hour}:00 IST)"}
+    ist_now      = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    _co_cfg      = get_config().get("eb_webhook_cutoff_time", "09:40")
+    _co_h, _co_m = (int(x) for x in _co_cfg.split(":"))
+    cutoff       = ist_now.replace(hour=_co_h, minute=_co_m, second=0, microsecond=0)
+    if ist_now >= cutoff:
+        print(f"[webhook] EarlyBloom ignored — after {_co_cfg} IST")
+        return {"received": False, "reason": f"after_cutoff ({_co_cfg} IST)"}
     if _eb_paused:
         loop     = asyncio.get_running_loop()
         alert_id = await loop.run_in_executor(None, save_alert, payload, "paused")

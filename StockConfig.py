@@ -25,8 +25,8 @@ DEFAULTS = {
     "qty_1000_plus":         "25",
     "min_upper_circuit_pct": "20",    # skip if upper circuit % from prev_close <= this
     "max_gapup_gain_pct":     "10",    # skip if (day_open - prev_close) / prev_close * 100 >= this
-    "eb_deadline_time":      "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
-    "eb_webhook_cutoff_hour": "10",    # ignore EB webhooks and skip order placement at or after this hour (IST, 24h)
+    "eb_deadline_time":       "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
+    "eb_webhook_cutoff_time": "09:40",  # ignore EB webhooks at or after this IST time (HH:MM)
 }
 
 # ── StockInPlay defaults ──────────────────────────────────────────────────────
@@ -311,12 +311,11 @@ def stock_config_ui():
     </div>
     <div class="card">
       <div class="section-title">Flow Control</div>
-        <label>Webhook Cutoff Hour (IST)</label>
+        <label>Webhook Cutoff Time (IST)</label>
         <div class="input-row">
-          <input type="number" id="eb_eb_webhook_cutoff_hour" step="1" min="0" max="23" placeholder="10" style="max-width:90px"/>
-          <span>hr</span>
+          <input type="text" id="eb_eb_webhook_cutoff_time" placeholder="09:40" style="max-width:90px"/>
         </div>
-        <div class="hint">Ignore new EarlyBloom webhooks and skip order placement at or after this hour (24h IST)</div>
+        <div class="hint">Ignore new EarlyBloom webhooks at or after this IST time (HH:MM, 24h). Default: 09:40</div>
         <label style="margin-top:14px">Flow Deadline (IST)</label>
         <div class="input-row">
           <input type="text" id="eb_eb_deadline_time" placeholder="15:00" style="max-width:90px"/>
@@ -434,7 +433,7 @@ def stock_config_ui():
 
   <script>
     const FIELDS = {
-      eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_upper_circuit_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_hour'],
+      eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_upper_circuit_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_time'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
             'min_upper_circuit_pct','max_gapup_gain_pct','max_fib_gain_pct','deadline_time','webhook_cutoff_hour']
     };
