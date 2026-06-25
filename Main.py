@@ -1444,12 +1444,13 @@ def eb_cancel_stock_run(payload: dict):
         stamped = f"[{ts}] cancelled from UI"
         conn.execute("""
             UPDATE stocks_fetched_info
-            SET order_status='cancelled',
+            SET order_status = CASE WHEN order_status='placed' THEN 'cancelled' ELSE 'skipped' END,
                 skip_reason = CASE
                     WHEN skip_reason IS NULL OR skip_reason = '' THEN ?
                     ELSE ? || char(10) || skip_reason
                 END
-            WHERE symbol=? AND order_status='placed'
+            WHERE symbol=? AND order_status IN ('placed','waiting')
+            AND date(fetched_at) = date('now')
         """, (stamped, stamped, symbol))
 
     print(f"[eb] {symbol}: run cancelled from UI")
@@ -2095,7 +2096,7 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
                     (str(order_id), symbol, "BUY", datetime.now(timezone.utc).isoformat())
                 )
                 conn.execute(
-                    "UPDATE stocks_fetched_info SET order_status='placed', order_id=?, skip_reason=NULL WHERE alert_id=? AND symbol=?",
+                    "UPDATE stocks_fetched_info SET order_status='placed', order_id=? WHERE alert_id=? AND symbol=?",
                     (str(order_id), alert_id, symbol)
                 )
             _eb_monitoring_stocks.pop(symbol, None)
