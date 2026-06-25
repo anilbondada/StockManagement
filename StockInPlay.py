@@ -619,6 +619,7 @@ def sip_resume():
 
 @router.post("/api/sip/disable-stock")
 def sip_disable_stock(payload: dict):
+    import Main as _main
     symbol = (payload.get("symbol") or "").strip().upper()
     if not symbol:
         return {"error": "symbol required"}
@@ -626,6 +627,30 @@ def sip_disable_stock(payload: dict):
     if symbol in _sip_flows:
         _sip_flows[symbol].cancel_evt.set()
         print(f"[sip] {symbol}: disabled and flow cancelled")
+
+    # Cancel any live SL orders — the flow thread exits after LIMIT BUY fills,
+    # so cancel_evt alone won't reach those orders
+    today = _now_ist().date().isoformat()
+    with _db() as conn:
+        row = conn.execute("""
+            SELECT limit_order_id, sl_buy_order_id, sl_sell_order_id, status
+            FROM sip_flows
+            WHERE symbol=? AND DATE(created_at)=?
+            ORDER BY id DESC LIMIT 1
+        """, (symbol, today)).fetchone()
+
+    if row:
+        limit_oid, sl_buy_oid, sl_sell_oid, status = row
+        kite = _main.get_kite()
+        for oid, label in [(sl_buy_oid, "SL-BUY"), (sl_sell_oid, "SL-SELL"), (limit_oid, "LIMIT-BUY")]:
+            if not oid:
+                continue
+            try:
+                kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=str(oid))
+                print(f"[sip] {symbol}: cancelled {label} order {oid} on disable")
+            except Exception as e:
+                print(f"[sip] {symbol}: cancel {label} {oid} — {e}")
+
     return {"disabled": symbol, "disabled_stocks": sorted(_sip_disabled_stocks)}
 
 
