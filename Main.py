@@ -275,6 +275,21 @@ def init_db():
 
 
 
+def _append_skip_reason(conn, alert_id, symbol: str, new_reason: str):
+    """Prepend new_reason with IST timestamp to existing skip_reason, keeping history."""
+    ist_tz = _tz(_td(hours=5, minutes=30))
+    ts = datetime.now(ist_tz).strftime("%H:%M")
+    stamped = f"[{ts}] {new_reason}"
+    conn.execute("""
+        UPDATE stocks_fetched_info
+        SET skip_reason = CASE
+            WHEN skip_reason IS NULL OR skip_reason = '' THEN ?
+            ELSE ? || char(10) || skip_reason
+        END
+        WHERE alert_id=? AND symbol=?
+    """, (stamped, stamped, alert_id, symbol))
+
+
 def upsert_order_update(data: dict):
     order_id = data.get("order_id")
     status   = (data.get("status") or "").upper().replace(" ", "_")
@@ -1117,7 +1132,7 @@ def _render_eb_stocks_table(stocks: list) -> str:
         if order_id:
             detail = f'Order&nbsp;<code style="font-size:.72rem;color:#93c5fd">{esc(order_id)}</code>'
         elif reason:
-            detail = f'<span style="color:#9ca3af;font-size:.78rem">{esc(reason)}</span>'
+            detail = f'<span style="color:#9ca3af;font-size:.78rem;white-space:pre-wrap">{esc(reason)}</span>'
 
         sym = esc(st["symbol"])
         action = "—"
@@ -1422,10 +1437,18 @@ def eb_cancel_stock_run(payload: dict):
             print(f"[eb] cancel-run: order cancel failed for {symbol} ({order_id}): {e}")
 
     with _db() as conn:
-        conn.execute(
-            "UPDATE stocks_fetched_info SET order_status='cancelled', skip_reason='cancelled from UI' WHERE symbol=? AND order_status='placed'",
-            (symbol,)
-        )
+        ist_tz = _tz(_td(hours=5, minutes=30))
+        ts = datetime.now(ist_tz).strftime("%H:%M")
+        stamped = f"[{ts}] cancelled from UI"
+        conn.execute("""
+            UPDATE stocks_fetched_info
+            SET order_status='cancelled',
+                skip_reason = CASE
+                    WHEN skip_reason IS NULL OR skip_reason = '' THEN ?
+                    ELSE ? || char(10) || skip_reason
+                END
+            WHERE symbol=? AND order_status='placed'
+        """, (stamped, stamped, symbol))
 
     print(f"[eb] {symbol}: run cancelled from UI")
     return {"cancelled": symbol, "order_id": cancelled_order, "cancel_error": cancel_error}
@@ -1460,9 +1483,10 @@ def eb_restore_stock(payload: dict):
 
     with _db() as conn:
         conn.execute(
-            "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason='restarted from UI', order_id=NULL WHERE alert_id=? AND symbol=?",
+            "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason=NULL, order_id=NULL WHERE alert_id=? AND symbol=?",
             (alert_id, symbol)
         )
+        _append_skip_reason(conn, alert_id, symbol, "restarted from UI")
 
     cancel_evt = threading.Event()
     _eb_monitoring_stocks[symbol] = cancel_evt
@@ -1992,10 +2016,8 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
         if now >= deadline:
             print(f"[eb-monitor] {symbol}: deadline reached ({_dl_cfg}), stopping monitor")
             with _db() as conn:
-                conn.execute(
-                    "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason='deadline reached' WHERE alert_id=? AND symbol=?",
-                    (alert_id, symbol)
-                )
+                conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                _append_skip_reason(conn, alert_id, symbol, "deadline reached")
             _eb_monitoring_stocks.pop(symbol, None)
             return
 
@@ -2006,10 +2028,8 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
         if cancel_evt.wait(timeout=wait_secs):
             print(f"[eb-monitor] {symbol}: cancelled from UI")
             with _db() as conn:
-                conn.execute(
-                    "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason='cancelled from UI' WHERE alert_id=? AND symbol=?",
-                    (alert_id, symbol)
-                )
+                conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                _append_skip_reason(conn, alert_id, symbol, "cancelled from UI")
             _eb_monitoring_stocks.pop(symbol, None)
             return
 
@@ -2027,10 +2047,8 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
                 reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
                 print(f"[eb-monitor] {symbol}: liquidity still insufficient — {reason}, retrying next candle")
                 with _db() as conn:
-                    conn.execute(
-                        "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason=? WHERE alert_id=? AND symbol=?",
-                        (reason, alert_id, symbol)
-                    )
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='waiting' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
                 continue
 
             # Liquidity met — place order
@@ -2084,10 +2102,8 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
         except Exception as e:
             print(f"[eb-monitor] {symbol}: ERROR {e}")
             with _db() as conn:
-                conn.execute(
-                    "UPDATE stocks_fetched_info SET order_status='error', skip_reason=? WHERE alert_id=? AND symbol=?",
-                    (str(e), alert_id, symbol)
-                )
+                conn.execute("UPDATE stocks_fetched_info SET order_status='error' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                _append_skip_reason(conn, alert_id, symbol, str(e))
             _eb_monitoring_stocks.pop(symbol, None)
             return
 
@@ -2122,10 +2138,8 @@ def _run_auto_orders(kite, rows: list) -> dict:
                 reason = f"pct_change={pct_change}% >= {skip_pct}" if pct_change >= skip_pct else f"ltp={ltp} > {skip_ltp}"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 with _db() as conn:
-                    conn.execute(
-                        "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason=? WHERE alert_id=? AND symbol=?",
-                        (reason, alert_id, symbol)
-                    )
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
                 continue
 
             gapup_gain_pct = ((day_open - prev_close) / prev_close * 100) if prev_close else 0
@@ -2135,20 +2149,16 @@ def _run_auto_orders(kite, rows: list) -> dict:
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 print(f"[auto-order] {symbol}: skipped — {reason}")
                 with _db() as conn:
-                    conn.execute(
-                        "UPDATE stocks_fetched_info SET order_status='skipped', skip_reason=? WHERE alert_id=? AND symbol=?",
-                        (reason, alert_id, symbol)
-                    )
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
                 continue
 
             if buy_qty < min_book_qty or sell_qty < min_book_qty:
                 reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
                 print(f"[auto-order] {symbol}: liquidity insufficient — {reason}, starting candle monitor")
                 with _db() as conn:
-                    conn.execute(
-                        "UPDATE stocks_fetched_info SET order_status='waiting', skip_reason=? WHERE alert_id=? AND symbol=?",
-                        (reason, alert_id, symbol)
-                    )
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='waiting' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
                 if symbol not in _eb_monitoring_stocks:
                     cancel_evt = threading.Event()
                     _eb_monitoring_stocks[symbol] = cancel_evt
@@ -2218,10 +2228,8 @@ def _run_auto_orders(kite, rows: list) -> dict:
             errors.append({"symbol": symbol, "error": str(e)})
             print(f"[auto-order] {symbol}: ERROR {e}")
             with _db() as conn:
-                conn.execute(
-                    "UPDATE stocks_fetched_info SET order_status='error', skip_reason=? WHERE alert_id=? AND symbol=?",
-                    (str(e), alert_id, symbol)
-                )
+                conn.execute("UPDATE stocks_fetched_info SET order_status='error' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                _append_skip_reason(conn, alert_id, symbol, str(e))
 
     return {"placed": placed, "skipped": skipped, "errors": errors}
 
