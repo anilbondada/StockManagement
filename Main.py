@@ -1131,6 +1131,8 @@ def _render_eb_stocks_table(stocks: list) -> str:
         detail = ""
         if order_id:
             detail = f'Order&nbsp;<code style="font-size:.72rem;color:#93c5fd">{esc(order_id)}</code>'
+            if reason:
+                detail += f'<br><span style="color:#9ca3af;font-size:.78rem;white-space:pre-wrap">{esc(reason)}</span>'
         elif reason:
             detail = f'<span style="color:#9ca3af;font-size:.78rem;white-space:pre-wrap">{esc(reason)}</span>'
 
