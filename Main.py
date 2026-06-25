@@ -2037,14 +2037,27 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
             return
 
         try:
-            kite    = get_kite()
-            cfg     = get_config()
-            min_book_qty = int(cfg.get("min_book_qty", 100000))
-            quote   = kite.quote(f"NSE:{symbol}")
-            qdata   = quote[f"NSE:{symbol}"]
-            ltp     = qdata["last_price"]
-            buy_qty = qdata.get("buy_quantity", 0)
-            sell_qty = qdata.get("sell_quantity", 0)
+            kite                = get_kite()
+            cfg                 = get_config()
+            min_book_qty        = int(cfg.get("min_book_qty", 100000))
+            min_upper_ckt_pct   = float(cfg.get("min_upper_circuit_pct", 20))
+            quote               = kite.quote(f"NSE:{symbol}")
+            qdata               = quote[f"NSE:{symbol}"]
+            ltp                 = qdata["last_price"]
+            prev_close          = qdata["ohlc"]["close"]
+            buy_qty             = qdata.get("buy_quantity", 0)
+            sell_qty            = qdata.get("sell_quantity", 0)
+            upper_circuit_limit = qdata.get("upper_circuit_limit", 0)
+
+            upper_ckt_pct = ((upper_circuit_limit - prev_close) / prev_close * 100) if prev_close else 0
+            if upper_ckt_pct < min_upper_ckt_pct:
+                reason = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}% (limit={upper_circuit_limit} prev_close={prev_close})"
+                print(f"[eb-monitor] {symbol}: skip (permanent) — {reason}")
+                with _db() as conn:
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
+                _eb_monitoring_stocks.pop(symbol, None)
+                return
 
             if buy_qty < min_book_qty or sell_qty < min_book_qty:
                 reason = f"buy_qty={buy_qty} sell_qty={sell_qty} — need >= {min_book_qty}"
@@ -2120,6 +2133,7 @@ def _run_auto_orders(kite, rows: list) -> dict:
     cfg                 = get_config()
     skip_pct            = float(cfg.get("skip_pct_change", 8))
     skip_ltp            = float(cfg.get("skip_ltp", 800))
+    min_upper_ckt_pct   = float(cfg.get("min_upper_circuit_pct", 20))
     max_gapup_gain_pct  = float(cfg.get("max_gapup_gain_pct", 10))
     min_book_qty        = int(cfg.get("min_book_qty", 100000))
 
@@ -2129,13 +2143,14 @@ def _run_auto_orders(kite, rows: list) -> dict:
 
     for alert_id, symbol, candle_high, pct_change in rows:
         try:
-            quote      = kite.quote(f"NSE:{symbol}")
-            qdata      = quote[f"NSE:{symbol}"]
-            ltp        = qdata["last_price"]
-            day_open   = qdata["ohlc"]["open"]
-            prev_close = qdata["ohlc"]["close"]
-            buy_qty    = qdata.get("buy_quantity", 0)
-            sell_qty   = qdata.get("sell_quantity", 0)
+            quote               = kite.quote(f"NSE:{symbol}")
+            qdata               = quote[f"NSE:{symbol}"]
+            ltp                 = qdata["last_price"]
+            day_open            = qdata["ohlc"]["open"]
+            prev_close          = qdata["ohlc"]["close"]
+            buy_qty             = qdata.get("buy_quantity", 0)
+            sell_qty            = qdata.get("sell_quantity", 0)
+            upper_circuit_limit = qdata.get("upper_circuit_limit", 0)
 
             if pct_change >= skip_pct or ltp > skip_ltp:
                 reason = f"pct_change={pct_change}% >= {skip_pct}" if pct_change >= skip_pct else f"ltp={ltp} > {skip_ltp}"
@@ -2149,6 +2164,16 @@ def _run_auto_orders(kite, rows: list) -> dict:
             if gapup_gain_pct >= max_gapup_gain_pct:
                 reason = (f"gapup {gapup_gain_pct:.1f}% >= max {max_gapup_gain_pct}% "
                           f"(open={day_open} prev_close={prev_close})")
+                skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
+                print(f"[auto-order] {symbol}: skipped — {reason}")
+                with _db() as conn:
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, reason)
+                continue
+
+            upper_ckt_pct = ((upper_circuit_limit - prev_close) / prev_close * 100) if prev_close else 0
+            if upper_ckt_pct < min_upper_ckt_pct:
+                reason = f"upper_circuit {upper_ckt_pct:.1f}% < {min_upper_ckt_pct}% (limit={upper_circuit_limit} prev_close={prev_close})"
                 skipped.append({"symbol": symbol, "ltp": ltp, "pct_change": pct_change, "reason": reason})
                 print(f"[auto-order] {symbol}: skipped — {reason}")
                 with _db() as conn:
