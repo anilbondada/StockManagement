@@ -122,11 +122,20 @@ def _save_flow(flow: SIPFlow, **cols):
             )
             flow.db_id = cur.lastrowid
     else:
+        note = cols.pop("note", None)
         update = {**cols, "status": flow.status, "updated_at": now}
         clause = ", ".join(f"{k}=?" for k in update)
-        with _db() as conn:
-            conn.execute(f"UPDATE sip_flows SET {clause} WHERE id=?",
-                         (*update.values(), flow.db_id))
+        if note:
+            ts = _now_ist().strftime("%H:%M")
+            stamped = f"[{ts}] {note}"
+            clause += ", note = CASE WHEN note IS NULL OR note = '' THEN ? ELSE ? || char(10) || note END"
+            with _db() as conn:
+                conn.execute(f"UPDATE sip_flows SET {clause} WHERE id=?",
+                             (*update.values(), stamped, stamped, flow.db_id))
+        else:
+            with _db() as conn:
+                conn.execute(f"UPDATE sip_flows SET {clause} WHERE id=?",
+                             (*update.values(), flow.db_id))
 
 
 # ── Cancel helper ─────────────────────────────────────────────────────────────
@@ -196,7 +205,7 @@ def _run_sip_flow(flow: SIPFlow):
         if symbol in _sip_disabled_stocks:
             print(f"[sip] {symbol}: cancelled mid-flow (stock disabled)")
             flow.status = "cancelled"
-            _save_flow(flow)
+            _save_flow(flow, note="Cancelled from UI")
             break
 
         now      = _now_ist()
@@ -651,6 +660,18 @@ def sip_disable_stock(payload: dict):
             except Exception as e:
                 print(f"[sip] {symbol}: cancel {label} {oid} — {e}")
 
+        # Append "Cancelled from UI" note on the DB row (covers post-fill state where
+        # the flow thread has already exited and _save_flow won't be called)
+        if symbol not in _sip_flows:
+            ts = _now_ist().strftime("%H:%M")
+            stamped = f"[{ts}] Cancelled from UI"
+            with _db() as conn:
+                conn.execute("""
+                    UPDATE sip_flows
+                    SET note = CASE WHEN note IS NULL OR note = '' THEN ? ELSE ? || char(10) || note END
+                    WHERE symbol=? AND DATE(created_at)=?
+                """, (stamped, stamped, symbol, today))
+
     return {"disabled": symbol, "disabled_stocks": sorted(_sip_disabled_stocks)}
 
 
@@ -697,7 +718,7 @@ def _render_stocks_table(stocks: list) -> str:
         alert_time   = (st.get("alert_time") or "").replace("T"," ")[11:16] or "—"
         detail = ""
         if st.get("note"):
-            detail = f'<span style="color:#9ca3af;font-size:.78rem">{esc(st["note"])}</span>'
+            detail = f'<span style="color:#9ca3af;font-size:.78rem;white-space:pre-wrap">{esc(st["note"])}</span>'
         if st.get("limit_order_id"):
             parts = [f'Limit&nbsp;<code style="font-size:.72rem;color:#93c5fd">{esc(st["limit_order_id"])}</code>']
             if st.get("sl_buy_order_id"):
