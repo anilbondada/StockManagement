@@ -1293,8 +1293,22 @@ def eb_resume():
                 WHERE status = 'paused' AND date(received_at) = date('now')
             """)
 
+        # Stocks whose liquidity monitor was killed by the pause
+        monitor_paused = conn.execute("""
+            SELECT symbol, alert_id, high FROM stocks_fetched_info
+            WHERE order_status = 'paused' AND date(fetched_at) = date('now')
+            GROUP BY symbol HAVING alert_id = MAX(alert_id)
+        """).fetchall()
+        if monitor_paused:
+            conn.execute("""
+                UPDATE stocks_fetched_info SET order_status = 'waiting'
+                WHERE order_status = 'paused' AND date(fetched_at) = date('now')
+            """)
+
     import threading
     restarted = []
+
+    # Re-process paused webhook alerts
     for alert_id, stocks_str in paused_rows:
         symbols = [s.strip() for s in (stocks_str or "").split(",") if s.strip()]
         if not symbols:
@@ -1306,7 +1320,22 @@ def eb_resume():
             daemon=True,
             name=f"eb-resume-{alert_id}",
         ).start()
-        print(f"[eb] resume: restarting alert_id={alert_id} symbols={symbols}")
+        print(f"[eb] resume: reprocessing paused alert_id={alert_id} symbols={symbols}")
+
+    # Restart monitors for stocks that were mid-monitor when pause happened
+    for symbol, alert_id, candle_high in monitor_paused:
+        if symbol in _eb_monitoring_stocks or not candle_high:
+            continue
+        cancel_evt = threading.Event()
+        _eb_monitoring_stocks[symbol] = cancel_evt
+        threading.Thread(
+            target=_eb_monitor_stock,
+            args=(alert_id, symbol, candle_high),
+            daemon=True,
+            name=f"eb-monitor-{symbol}",
+        ).start()
+        restarted.append(symbol)
+        print(f"[eb] resume: restarting monitor for {symbol} alert_id={alert_id} (was paused mid-monitor)")
 
     return {"paused": False, "restarted": restarted}
 
