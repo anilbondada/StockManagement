@@ -440,11 +440,12 @@ def _fetch_complete_candle(data: dict):
             with _db() as conn:
                 conn.execute("UPDATE order_updates SET candle_high=?, candle_low=? WHERE order_id=?",
                              (c["high"], c["low"], order_id))
-                if row is None:  # is_webhook not read yet (row was None = no DB row at dedup check time)
-                    row2 = conn.execute(
-                        "SELECT is_webhook_order FROM order_updates WHERE order_id=?", (order_id,)
-                    ).fetchone()
-                    is_webhook = row2 and row2[0] == 1
+                # Always re-read is_webhook_order here — monitor thread may have set it to 1
+                # via ON CONFLICT UPDATE after a fast fill raced ahead of the INSERT.
+                row2 = conn.execute(
+                    "SELECT is_webhook_order FROM order_updates WHERE order_id=?", (order_id,)
+                ).fetchone()
+                is_webhook = row2 and row2[0] == 1
             print(f"[order-update] {symbol}: 5-min candle high={c['high']} low={c['low']}")
 
             if _paused:
