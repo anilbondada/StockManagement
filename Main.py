@@ -1267,10 +1267,19 @@ def eb_pause():
                         ),
                     )
 
-    # Cancel all in-progress liquidity-monitor threads
+    # Mark monitoring stocks as paused in DB BEFORE signalling threads to stop,
+    # so the monitor thread can distinguish a pause signal from a UI cancel.
+    with _db() as conn:
+        for sym in list(_eb_monitoring_stocks.keys()):
+            conn.execute("""
+                UPDATE stocks_fetched_info SET order_status='paused'
+                WHERE symbol=? AND order_status='waiting' AND date(fetched_at)=date('now')
+            """, (sym,))
+            print(f"[eb] paused — marked {sym} as paused in DB")
+
     for sym, evt in list(_eb_monitoring_stocks.items()):
         evt.set()
-        print(f"[eb] paused — cancelled monitor for {sym}")
+        print(f"[eb] paused — signalled monitor thread to stop for {sym}")
 
     return {"paused": True, "cancelled": cancelled, "errors": errors}
 
@@ -2061,10 +2070,19 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
         print(f"[eb-monitor] {symbol}: waiting {wait_secs:.0f}s for candle at {next_close.strftime('%H:%M')}")
 
         if cancel_evt.wait(timeout=wait_secs):
-            print(f"[eb-monitor] {symbol}: cancelled from UI")
+            # Read DB to distinguish: paused (evt set by eb_pause) vs UI cancel
             with _db() as conn:
-                conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
-                _append_skip_reason(conn, alert_id, symbol, "cancelled from UI")
+                row = conn.execute(
+                    "SELECT order_status FROM stocks_fetched_info WHERE alert_id=? AND symbol=?",
+                    (alert_id, symbol)
+                ).fetchone()
+            if row and row[0] == 'paused':
+                print(f"[eb-monitor] {symbol}: stopped — system paused")
+            else:
+                print(f"[eb-monitor] {symbol}: cancelled from UI")
+                with _db() as conn:
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, "cancelled from UI")
             _eb_monitoring_stocks.pop(symbol, None)
             return
 
