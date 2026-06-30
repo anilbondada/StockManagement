@@ -1267,15 +1267,15 @@ def eb_pause():
                         ),
                     )
 
-    # Mark monitoring stocks as paused in DB BEFORE signalling threads to stop,
-    # so the monitor thread can distinguish a pause signal from a UI cancel.
+    # Pause ALL stocks that haven't placed orders yet: both 'waiting' (in liquidity
+    # monitor) and 'skipped' (failed initial checks). Must happen BEFORE signalling
+    # monitor threads so they can distinguish a pause signal from a UI cancel.
     with _db() as conn:
-        for sym in list(_eb_monitoring_stocks.keys()):
-            conn.execute("""
-                UPDATE stocks_fetched_info SET order_status='paused'
-                WHERE symbol=? AND order_status='waiting' AND date(fetched_at)=date('now')
-            """, (sym,))
-            print(f"[eb] paused — marked {sym} as paused in DB")
+        conn.execute("""
+            UPDATE stocks_fetched_info SET order_status='paused'
+            WHERE order_status IN ('waiting', 'skipped') AND date(fetched_at)=date('now')
+        """)
+    print("[eb] paused — marked all waiting/skipped stocks as paused in DB")
 
     for sym, evt in list(_eb_monitoring_stocks.items()):
         evt.set()
@@ -1302,13 +1302,14 @@ def eb_resume():
                 WHERE status = 'paused' AND date(received_at) = date('now')
             """)
 
-        # Stocks whose liquidity monitor was killed by the pause
-        monitor_paused = conn.execute("""
-            SELECT symbol, alert_id, high FROM stocks_fetched_info
+        # All stocks that were paused (waiting in monitor OR skipped initial checks)
+        all_paused = conn.execute("""
+            SELECT symbol, alert_id, high, pct_change FROM stocks_fetched_info
             WHERE order_status = 'paused' AND date(fetched_at) = date('now')
+              AND high IS NOT NULL AND pct_change IS NOT NULL
             GROUP BY symbol HAVING alert_id = MAX(alert_id)
         """).fetchall()
-        if monitor_paused:
+        if all_paused:
             conn.execute("""
                 UPDATE stocks_fetched_info SET order_status = 'waiting'
                 WHERE order_status = 'paused' AND date(fetched_at) = date('now')
@@ -1317,7 +1318,7 @@ def eb_resume():
     import threading
     restarted = []
 
-    # Re-process paused webhook alerts
+    # Re-process webhook alerts that arrived while paused
     for alert_id, stocks_str in paused_rows:
         symbols = [s.strip() for s in (stocks_str or "").split(",") if s.strip()]
         if not symbols:
@@ -1331,20 +1332,25 @@ def eb_resume():
         ).start()
         print(f"[eb] resume: reprocessing paused alert_id={alert_id} symbols={symbols}")
 
-    # Restart monitors for stocks that were mid-monitor when pause happened
-    for symbol, alert_id, candle_high in monitor_paused:
-        if symbol in _eb_monitoring_stocks or not candle_high:
-            continue
-        cancel_evt = threading.Event()
-        _eb_monitoring_stocks[symbol] = cancel_evt
-        threading.Thread(
-            target=_eb_monitor_stock,
-            args=(alert_id, symbol, candle_high),
-            daemon=True,
-            name=f"eb-monitor-{symbol}",
-        ).start()
-        restarted.append(symbol)
-        print(f"[eb] resume: restarting monitor for {symbol} alert_id={alert_id} (was paused mid-monitor)")
+    # Re-run order placement for all paused stocks (waiting + skipped).
+    # _run_auto_orders re-evaluates current market conditions: places order if
+    # conditions met, or starts a new liquidity monitor if still insufficient.
+    if all_paused:
+        order_rows = [(alert_id, symbol, high, pct_change)
+                      for symbol, alert_id, high, pct_change in all_paused]
+        restarted.extend([r[1] for r in order_rows])
+
+        def _resume_orders():
+            try:
+                kite   = get_kite()
+                result = _run_auto_orders(kite, order_rows)
+                print(f"[eb] resume: placed={len(result['placed'])} "
+                      f"skipped={len(result['skipped'])} errors={len(result['errors'])}")
+            except Exception as e:
+                print(f"[eb] resume: _run_auto_orders error: {e}")
+
+        threading.Thread(target=_resume_orders, daemon=True, name="eb-resume-orders").start()
+        print(f"[eb] resume: queued {len(order_rows)} paused stocks for order placement")
 
     return {"paused": False, "restarted": restarted}
 
