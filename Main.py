@@ -277,7 +277,7 @@ def init_db():
 
 def _append_skip_reason(conn, alert_id, symbol: str, new_reason: str):
     """Prepend new_reason with IST timestamp to existing skip_reason, keeping history."""
-    ist_tz = _tz(_td(hours=5, minutes=30))
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
     ts = datetime.now(ist_tz).strftime("%H:%M")
     stamped = f"[{ts}] {new_reason}"
     conn.execute("""
@@ -1486,7 +1486,7 @@ def eb_cancel_stock_run(payload: dict):
             print(f"[eb] cancel-run: order cancel failed for {symbol} ({order_id}): {e}")
 
     with _db() as conn:
-        ist_tz = _tz(_td(hours=5, minutes=30))
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
         ts = datetime.now(ist_tz).strftime("%H:%M")
         stamped = f"[{ts}] cancelled from UI"
         conn.execute("""
