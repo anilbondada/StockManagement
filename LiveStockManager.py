@@ -105,7 +105,30 @@ def init_live_table():
                 depth_json       TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS quote_snapshots (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol              TEXT,
+                candle_time         TEXT,
+                last_price          REAL,
+                buy_quantity        INTEGER,
+                sell_quantity       INTEGER,
+                volume              INTEGER,
+                average_price       REAL,
+                upper_circuit_limit REAL,
+                lower_circuit_limit REAL,
+                day_open            REAL,
+                day_high            REAL,
+                day_low             REAL,
+                prev_close          REAL,
+                snapshot_at         TEXT
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_qs_symbol_date ON quote_snapshots(symbol, snapshot_at)"
+        )
     _start_tick_flush_thread()
+    _start_quote_poll_thread()
 
 
 def _flush_tick_buffer():
@@ -140,6 +163,65 @@ def _flush_tick_buffer():
 
 def _start_tick_flush_thread():
     t = threading.Thread(target=_flush_tick_buffer, daemon=True, name="tick-flush")
+    t.start()
+
+
+def _quote_poll_loop():
+    """At each 5-min candle close, batch-fetch kite.quote() for all active symbols and store."""
+    import Main as _main
+    ist = timezone(timedelta(hours=5, minutes=30))
+    while True:
+        now = datetime.now(ist).replace(tzinfo=None)
+        mins_to_next = 5 - (now.minute % 5)
+        next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=mins_to_next)
+        wait = (next_boundary - now).total_seconds() + 5  # 5s buffer after candle close
+        time.sleep(max(wait, 1))
+
+        if not _active_subs:
+            continue
+        symbols = [sub["symbol"] for sub in _active_subs.values() if sub.get("symbol")]
+        if not symbols:
+            continue
+        try:
+            kite = _main.get_kite()
+            instruments = [f"NSE:{s}" for s in symbols]
+            quotes = kite.quote(instruments)
+            candle_time = datetime.now(ist).strftime("%H:%M")
+            snapshot_at = datetime.now(ist).isoformat()
+            rows = []
+            for sym in symbols:
+                q = quotes.get(f"NSE:{sym}", {})
+                ohlc = q.get("ohlc", {})
+                rows.append((
+                    sym, candle_time,
+                    q.get("last_price"),
+                    q.get("buy_quantity", 0),
+                    q.get("sell_quantity", 0),
+                    q.get("volume_traded", 0),
+                    q.get("average_price"),
+                    q.get("upper_circuit_limit"),
+                    q.get("lower_circuit_limit"),
+                    ohlc.get("open"),
+                    ohlc.get("high"),
+                    ohlc.get("low"),
+                    ohlc.get("close"),
+                    snapshot_at,
+                ))
+            with _db() as conn:
+                conn.executemany("""
+                    INSERT INTO quote_snapshots
+                    (symbol, candle_time, last_price, buy_quantity, sell_quantity,
+                     volume, average_price, upper_circuit_limit, lower_circuit_limit,
+                     day_open, day_high, day_low, prev_close, snapshot_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, rows)
+            print(f"[quote-poll] {candle_time} — saved {len(rows)} snapshots: {', '.join(symbols)}")
+        except Exception as e:
+            print(f"[quote-poll] Error: {e}")
+
+
+def _start_quote_poll_thread():
+    t = threading.Thread(target=_quote_poll_loop, daemon=True, name="quote-poll")
     t.start()
 
 
@@ -460,6 +542,27 @@ def api_order_book_by_symbol():
     return result
 
 
+@router.get("/api/live-candles/quote-by-symbol")
+def api_quote_by_symbol():
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT symbol, candle_time, last_price, buy_quantity, sell_quantity,
+                   volume, average_price, upper_circuit_limit, lower_circuit_limit,
+                   day_open, day_high, day_low, prev_close, snapshot_at
+            FROM quote_snapshots
+            WHERE DATE(snapshot_at) = DATE('now')
+            ORDER BY symbol, candle_time
+        """).fetchall()
+    grouped = {}
+    for r in rows:
+        sym = r["symbol"]
+        if sym not in grouped:
+            grouped[sym] = []
+        grouped[sym].append(dict(r))
+    return grouped
+
+
 @router.get("/volume-chart", response_class=HTMLResponse)
 def volume_chart_ui():
     return """<!DOCTYPE html>
@@ -534,37 +637,21 @@ def volume_chart_ui():
     </div>
     <button class="dp-close" onclick="closeDepth()">✕</button>
   </div>
-  <div class="dp-body">
-    <div>
-      <div class="dp-section-title bid">Bid (Buy orders)</div>
-      <table class="dp-table">
-        <thead><tr><th>Price</th><th>Qty</th><th>Orders</th></tr></thead>
-        <tbody id="dp-bid"></tbody>
-      </table>
-    </div>
-    <div>
-      <div class="dp-section-title ask">Ask (Sell orders)</div>
-      <table class="dp-table">
-        <thead><tr><th>Price</th><th>Qty</th><th>Orders</th></tr></thead>
-        <tbody id="dp-ask"></tbody>
-      </table>
-    </div>
-  </div>
+  <div id="dp-bid" style="display:none"></div>
+  <div id="dp-ask" style="display:none"></div>
   <div class="dp-summary">
-    <div class="dp-stat"><span class="dp-stat-label">Total Bid Qty</span><span class="dp-stat-value green" id="dp-bid-total">—</span></div>
-    <div class="dp-stat"><span class="dp-stat-label">Total Ask Qty</span><span class="dp-stat-value red" id="dp-ask-total">—</span></div>
-    <div class="dp-stat"><span class="dp-stat-label">Agg Buy Vol</span><span class="dp-stat-value green" id="dp-agg-buy">—</span></div>
-    <div class="dp-stat"><span class="dp-stat-label">Agg Sell Vol</span><span class="dp-stat-value red" id="dp-agg-sell">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Buy Quantity</span><span class="dp-stat-value green" id="dp-agg-buy">—</span></div>
+    <div class="dp-stat"><span class="dp-stat-label">Sell Quantity</span><span class="dp-stat-value red" id="dp-agg-sell">—</span></div>
     <div class="dp-stat"><span class="dp-stat-label">Traded Volume</span><span class="dp-stat-value blue" id="dp-vol">—</span></div>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-title">Aggressive Buy Volume (Market Orders Hitting Ask)</div>
+  <div class="card-title">Buy Quantity (Quote API)</div>
   <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
 </div>
 <div class="card">
-  <div class="card-title">Aggressive Sell Volume (Market Orders Hitting Bid)</div>
+  <div class="card-title">Sell Quantity (Quote API)</div>
   <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
 </div>
 <div class="card">
@@ -575,8 +662,8 @@ def volume_chart_ui():
 <script>
 const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
 const charts = {};
-let _obData  = {};   // latest order book data, keyed by symbol
-let _volData = {};   // latest traded volume data, keyed by symbol
+let _quoteData = {};  // latest quote snapshot data, keyed by symbol
+let _volData   = {};  // latest traded volume data, keyed by symbol
 
 function fmtVol(v){
   if(v==null||v===0) return '0';
@@ -652,37 +739,30 @@ function renderChart(id, data, valueKey, fmtFn) {
 }
 
 function showDepth(sym, time) {
-  const candles = _obData[sym] || [];
-  const candle  = candles.find(c => c.candle_time === time);
+  const quoteCandles = _quoteData[sym] || [];
+  const quoteCandle  = quoteCandles.find(c => c.candle_time === time);
   const volCandles = _volData[sym] || [];
   const volCandle  = volCandles.find(c => c.candle_time === time);
   const vol = volCandle ? volCandle.volume : null;
 
   document.getElementById('dp-title').textContent = sym + '  —  ' + time;
-  document.getElementById('dp-meta').textContent  = 'Order book snapshot at candle close · click another point to update';
+  document.getElementById('dp-meta').textContent  = 'Quote snapshot at candle close · click another point to update';
 
-  const depth = candle && candle.depth ? candle.depth : null;
-  const bidLevels  = depth ? (depth.buy  || []) : [];
-  const askLevels  = depth ? (depth.sell || []) : [];
-
-  const bidTotal = bidLevels.reduce((s, l) => s + (l.quantity || 0), 0);
-  const askTotal = askLevels.reduce((s, l) => s + (l.quantity || 0), 0);
+  const bidLevels = [];
+  const askLevels = [];
+  const bidTotal  = 0;
+  const askTotal  = 0;
 
   function buildRows(levels, cls) {
-    if (!levels.length) return '<tr><td colspan="3" style="color:#4b5563;text-align:center">No data</td></tr>';
-    return levels.map(l =>
-      '<tr><td class="' + cls + '">' + l.price.toFixed(2) + '</td>' +
-      '<td>' + fmtVol(l.quantity) + '</td>' +
-      '<td>' + (l.orders || 0) + '</td></tr>'
-    ).join('');
+    return '<tr><td colspan="3" style="color:#4b5563;text-align:center">No data</td></tr>';
   }
 
   document.getElementById('dp-bid').innerHTML     = buildRows(bidLevels, 'bid-price');
   document.getElementById('dp-ask').innerHTML     = buildRows(askLevels, 'ask-price');
-  document.getElementById('dp-bid-total').textContent = fmtVol(bidTotal);
-  document.getElementById('dp-ask-total').textContent = fmtVol(askTotal);
-  document.getElementById('dp-agg-buy').textContent  = candle ? fmtVol(candle.agg_buy_vol)  : '—';
-  document.getElementById('dp-agg-sell').textContent = candle ? fmtVol(candle.agg_sell_vol) : '—';
+  document.getElementById('dp-bid-total').textContent = '—';
+  document.getElementById('dp-ask-total').textContent = '—';
+  document.getElementById('dp-agg-buy').textContent  = quoteCandle ? fmtVol(quoteCandle.buy_quantity)  : '—';
+  document.getElementById('dp-agg-sell').textContent = quoteCandle ? fmtVol(quoteCandle.sell_quantity) : '—';
   document.getElementById('dp-vol').textContent       = vol != null ? fmtVol(vol) : '—';
 
   const panel = document.getElementById('depth-panel');
@@ -694,13 +774,13 @@ function closeDepth() {
   document.getElementById('depth-panel').classList.remove('visible');
 }
 
-async function loadOrderBook() {
+async function loadQuote() {
   try {
-    const obData = await fetch('/api/live-candles/order-book-by-symbol').then(r => r.json());
-    _obData = obData;
-    if (Object.keys(obData).length) {
-      renderChart('cv-buy',  obData, 'agg_buy_vol',  fmtVol);
-      renderChart('cv-sell', obData, 'agg_sell_vol', fmtVol);
+    const qData = await fetch('/api/live-candles/quote-by-symbol').then(r => r.json());
+    _quoteData = qData;
+    if (Object.keys(qData).length) {
+      renderChart('cv-buy',  qData, 'buy_quantity',  fmtVol);
+      renderChart('cv-sell', qData, 'sell_quantity', fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -710,17 +790,17 @@ async function loadOrderBook() {
 
 async function loadAll() {
   try {
-    const [volData, obData] = await Promise.all([
+    const [volData, qData] = await Promise.all([
       fetch('/api/live-candles/by-symbol').then(r => r.json()),
-      fetch('/api/live-candles/order-book-by-symbol').then(r => r.json()),
+      fetch('/api/live-candles/quote-by-symbol').then(r => r.json()),
     ]);
-    _volData = volData;
-    _obData  = obData;
+    _volData   = volData;
+    _quoteData = qData;
     if (Object.keys(volData).length)
-      renderChart('cv-vol',  volData, 'volume',      fmtVol);
-    if (Object.keys(obData).length) {
-      renderChart('cv-buy',  obData, 'agg_buy_vol',  fmtVol);
-      renderChart('cv-sell', obData, 'agg_sell_vol', fmtVol);
+      renderChart('cv-vol',  volData, 'volume',        fmtVol);
+    if (Object.keys(qData).length) {
+      renderChart('cv-buy',  qData,  'buy_quantity',  fmtVol);
+      renderChart('cv-sell', qData,  'sell_quantity', fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -735,7 +815,7 @@ ws.onclose = () => { document.getElementById('dot').classList.remove('live'); se
 ws.onmessage = e => {
   try {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'tick_flush') { loadOrderBook(); }
+    if (msg.type === 'tick_flush') { loadQuote(); }
     else { loadAll(); }
   } catch { loadAll(); }
 };
