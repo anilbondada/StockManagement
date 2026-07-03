@@ -572,10 +572,13 @@ def volume_chart_ui():
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>Volume Chart — Live Candles</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@1.2.1/dist/chartjs-plugin-zoom.min.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:24px 16px}
-    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+    html,body{height:100%;overflow-y:auto}
+    body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#cdd6f4;padding:20px 16px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
     h1{font-size:1.25rem;color:#fff}
     .meta{font-size:.8rem;color:#6b7280;margin-top:2px}
     .dot{width:8px;height:8px;border-radius:50%;background:#4b5563;display:inline-block;margin-right:5px;vertical-align:middle}
@@ -583,37 +586,25 @@ def volume_chart_ui():
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:700;cursor:pointer;background:#2a2a3e;color:#9ca3af}
     .btn:hover{background:#374151}
-    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:20px;margin-bottom:20px}
-    .card-title{font-size:.9rem;font-weight:700;color:#9ca3af;margin-bottom:14px;text-transform:uppercase;letter-spacing:.05em}
-    .chart-wrap{position:relative;height:320px;cursor:pointer}
-    .empty{text-align:center;padding:80px;color:#4b5563}
-    /* Depth detail panel */
-    #depth-panel{display:none;background:#1e1e2e;border:1px solid #374151;border-radius:12px;padding:18px;margin-bottom:20px}
-    #depth-panel.visible{display:block}
-    .dp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
-    .dp-title{font-size:.95rem;font-weight:700;color:#fff}
-    .dp-meta{font-size:.8rem;color:#6b7280}
-    .dp-close{background:none;border:none;color:#6b7280;font-size:1.1rem;cursor:pointer;padding:2px 6px}
-    .dp-close:hover{color:#fff}
-    .dp-body{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-    .dp-section-title{font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
-    .dp-section-title.bid{color:#34d399}
-    .dp-section-title.ask{color:#f87171}
-    .dp-table{width:100%;border-collapse:collapse;font-size:.78rem}
-    .dp-table th{color:#6b7280;font-weight:600;padding:4px 8px;text-align:right;border-bottom:1px solid #2a2a3e}
-    .dp-table th:first-child{text-align:left}
-    .dp-table td{padding:4px 8px;text-align:right;border-bottom:1px solid #1a1a2e}
-    .dp-table td:first-child{text-align:left}
-    .dp-table tr:last-child td{border-bottom:none}
-    .dp-table .bid-price{color:#34d399}
-    .dp-table .ask-price{color:#f87171}
-    .dp-summary{margin-top:14px;display:flex;gap:24px;flex-wrap:wrap;padding-top:12px;border-top:1px solid #2a2a3e}
-    .dp-stat{display:flex;flex-direction:column;gap:2px}
-    .dp-stat-label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
-    .dp-stat-value{font-size:.95rem;font-weight:700}
-    .dp-stat-value.green{color:#34d399}
-    .dp-stat-value.red{color:#f87171}
-    .dp-stat-value.blue{color:#818cf8}
+    .card{background:#1e1e2e;border-radius:12px;border:1px solid #2a2a3e;padding:18px}
+    .card-title{font-size:.85rem;font-weight:700;color:#9ca3af;margin-bottom:12px;text-transform:uppercase;letter-spacing:.05em}
+    .chart-wrap{position:relative;height:300px;cursor:grab}
+    .chart-wrap:active{cursor:grabbing}
+    .hint{font-size:.7rem;color:#374151;margin-top:5px;text-align:right}
+    .row-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+    .row-1{margin-bottom:14px}
+    /* Snapshot panel */
+    #snap-panel{display:none;background:#1a1a2e;border:1px solid #2a2a3e;border-radius:10px;padding:14px;margin-bottom:14px}
+    #snap-panel.visible{display:block}
+    .sp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+    .sp-title{font-size:.9rem;font-weight:700;color:#fff}
+    .sp-close{background:none;border:none;color:#6b7280;font-size:1rem;cursor:pointer;padding:2px 6px}
+    .sp-close:hover{color:#fff}
+    .sp-stats{display:flex;gap:24px;flex-wrap:wrap}
+    .sp-stat{display:flex;flex-direction:column;gap:2px}
+    .sp-label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
+    .sp-value{font-size:.9rem;font-weight:700}
+    .green{color:#34d399}.red{color:#f87171}.blue{color:#818cf8}
   </style>
 </head>
 <body>
@@ -628,190 +619,148 @@ def volume_chart_ui():
   </div>
 </div>
 
-<!-- Depth detail panel (shown on click) -->
-<div id="depth-panel">
-  <div class="dp-header">
-    <div>
-      <div class="dp-title" id="dp-title">—</div>
-      <div class="dp-meta" id="dp-meta">Click any chart point to see order book snapshot</div>
-    </div>
-    <button class="dp-close" onclick="closeDepth()">✕</button>
+<div id="snap-panel">
+  <div class="sp-header">
+    <span class="sp-title" id="sp-title">—</span>
+    <button class="sp-close" onclick="document.getElementById('snap-panel').classList.remove('visible')">✕</button>
   </div>
-  <div id="dp-bid" style="display:none"></div>
-  <div id="dp-ask" style="display:none"></div>
-  <div class="dp-summary">
-    <div class="dp-stat"><span class="dp-stat-label">Buy Quantity</span><span class="dp-stat-value green" id="dp-agg-buy">—</span></div>
-    <div class="dp-stat"><span class="dp-stat-label">Sell Quantity</span><span class="dp-stat-value red" id="dp-agg-sell">—</span></div>
-    <div class="dp-stat"><span class="dp-stat-label">Traded Volume</span><span class="dp-stat-value blue" id="dp-vol">—</span></div>
+  <div class="sp-stats">
+    <div class="sp-stat"><span class="sp-label">Buy Qty</span><span class="sp-value green" id="sp-buy">—</span></div>
+    <div class="sp-stat"><span class="sp-label">Sell Qty</span><span class="sp-value red"   id="sp-sell">—</span></div>
+    <div class="sp-stat"><span class="sp-label">Volume</span><span class="sp-value blue"  id="sp-vol">—</span></div>
+    <div class="sp-stat"><span class="sp-label">Last Price</span><span class="sp-value"   id="sp-ltp">—</span></div>
   </div>
 </div>
 
-<div class="card">
-  <div class="card-title">Buy Quantity (Quote API)</div>
-  <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
+<div class="row-2">
+  <div class="card">
+    <div class="card-title">Buy Quantity</div>
+    <div class="chart-wrap"><canvas id="cv-buy"></canvas></div>
+    <div class="hint">drag to pan &nbsp;·&nbsp; scroll to zoom</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Sell Quantity</div>
+    <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
+    <div class="hint">drag to pan &nbsp;·&nbsp; scroll to zoom</div>
+  </div>
 </div>
-<div class="card">
-  <div class="card-title">Sell Quantity (Quote API)</div>
-  <div class="chart-wrap"><canvas id="cv-sell"></canvas></div>
-</div>
-<div class="card">
+<div class="row-1 card">
   <div class="card-title">Traded Volume</div>
   <div class="chart-wrap"><canvas id="cv-vol"></canvas></div>
+  <div class="hint">drag to pan &nbsp;·&nbsp; scroll to zoom</div>
 </div>
 
 <script>
-const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
-const charts = {};
-let _quoteData = {};  // latest quote snapshot data, keyed by symbol
+const COLORS  = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
+const WINDOW  = 6;  // 30 mins = 6 × 5-min candles shown by default
+const charts  = {};
+let _quoteData = {};
 
 function fmtVol(v){
-  if(v==null||v===0) return '0';
-  if(v>=1e6) return (v/1e6).toFixed(2)+'M';
-  if(v>=1e3) return (v/1e3).toFixed(0)+'K';
+  if(v==null) return '—';
+  if(v===0)   return '0';
+  if(v>=1e6)  return (v/1e6).toFixed(2)+'M';
+  if(v>=1e3)  return (v/1e3).toFixed(0)+'K';
   return String(Math.round(v));
 }
 
-function makeLabels(data, candleKey) {
-  const timeSet = new Set();
-  Object.values(data).forEach(arr => arr.forEach(c => timeSet.add(c[candleKey])));
-  return Array.from(timeSet).sort();
+function makeLabels(data){
+  const s=new Set();
+  Object.values(data).forEach(a=>a.forEach(c=>s.add(c.candle_time)));
+  return Array.from(s).sort();
 }
 
-function makeDatasets(data, labels, valueKey) {
-  return Object.keys(data).sort().map((sym, i) => {
-    const byTime = {};
-    data[sym].forEach(c => byTime[c.candle_time] = c[valueKey] ?? null);
+function makeDatasets(data, labels, key){
+  return Object.keys(data).sort().map((sym,i)=>{
+    const m={};
+    data[sym].forEach(c=>m[c.candle_time]=c[key]??null);
     return {
       label: sym,
-      data: labels.map(t => byTime[t] ?? null),
-      borderColor: COLORS[i % COLORS.length],
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      pointRadius: 3,
-      pointHoverRadius: 6,
-      tension: 0.3,
-      spanGaps: false,
+      data: labels.map(t=>m[t]??null),
+      borderColor: COLORS[i%COLORS.length],
+      backgroundColor:'transparent',
+      borderWidth:2, pointRadius:3, pointHoverRadius:6,
+      tension:0.3, spanGaps:false,
     };
   });
 }
 
-function chartOptions(fmtFn) {
+function zoomOpts(fmtFn){
   return {
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { intersect: false, mode: 'index' },
-    plugins: {
-      legend: { display: true, position: 'top',
-        labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14, padding: 16 } },
-      tooltip: { callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmtFn(ctx.parsed.y) } }
+    responsive:true, maintainAspectRatio:false,
+    interaction:{intersect:false, mode:'index'},
+    plugins:{
+      legend:{display:true, position:'top',
+        labels:{color:'#9ca3af', font:{size:11}, boxWidth:12, padding:14}},
+      tooltip:{callbacks:{label:c=>' '+c.dataset.label+': '+fmtFn(c.parsed.y)}},
+      zoom:{
+        pan:{enabled:true, mode:'x'},
+        zoom:{wheel:{enabled:true}, pinch:{enabled:true}, mode:'x'},
+      },
     },
-    scales: {
-      x: { ticks: { color: '#6b7280', font: { size: 10 }, maxRotation: 45 }, grid: { color: '#1a1a2e' } },
-      y: { ticks: { color: '#6b7280', font: { size: 10 }, callback: v => fmtFn(v) }, grid: { color: '#1a1a2e' } }
+    scales:{
+      x:{ticks:{color:'#6b7280',font:{size:10},maxRotation:45}, grid:{color:'#1a1a2e'}},
+      y:{ticks:{color:'#6b7280',font:{size:10},callback:v=>fmtFn(v)}, grid:{color:'#1a1a2e'}},
     },
-    onClick(evt, active) {
-      if (!active.length) return;
-      const idx     = active[0].index;
-      const dsIdx   = active[0].datasetIndex;
-      const chart   = active[0].chart;
-      const time    = chart.data.labels[idx];
-      const sym     = chart.data.datasets[dsIdx].label;
-      showDepth(sym, time);
-    }
+    onClick(evt, active){
+      if(!active.length) return;
+      const idx=active[0].index, dsIdx=active[0].datasetIndex;
+      const ch=active[0].chart;
+      showSnap(ch.data.datasets[dsIdx].label, ch.data.labels[idx]);
+    },
   };
 }
 
-function renderChart(id, data, valueKey, fmtFn) {
-  const labels   = makeLabels(data, 'candle_time');
-  const datasets = makeDatasets(data, labels, valueKey);
-  if (!charts[id]) {
-    charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
-      type: 'line',
-      data: { labels, datasets },
-      options: chartOptions(fmtFn),
-    });
+function applyWindow(ch, labels){
+  if(!labels.length) return;
+  ch.options.scales.x.min = labels[Math.max(0,labels.length-WINDOW)];
+  ch.options.scales.x.max = labels[labels.length-1];
+  ch.update('none');
+}
+
+function renderChart(id, data, key, fmtFn){
+  const labels   = makeLabels(data);
+  const datasets = makeDatasets(data, labels, key);
+  if(!charts[id]){
+    charts[id] = new Chart(document.getElementById(id).getContext('2d'),
+      {type:'line', data:{labels, datasets}, options:zoomOpts(fmtFn)});
   } else {
     charts[id].data.labels   = labels;
     charts[id].data.datasets = datasets;
-    charts[id].update('none');
   }
+  applyWindow(charts[id], labels);
 }
 
-function showDepth(sym, time) {
-  const quoteCandles = _quoteData[sym] || [];
-  const quoteCandle  = quoteCandles.find(c => c.candle_time === time);
-  const vol = quoteCandle ? quoteCandle.volume : null;
-
-  document.getElementById('dp-title').textContent = sym + '  —  ' + time;
-  document.getElementById('dp-meta').textContent  = 'Quote snapshot at candle close · click another point to update';
-
-  const bidLevels = [];
-  const askLevels = [];
-  const bidTotal  = 0;
-  const askTotal  = 0;
-
-  function buildRows(levels, cls) {
-    return '<tr><td colspan="3" style="color:#4b5563;text-align:center">No data</td></tr>';
-  }
-
-  document.getElementById('dp-bid').innerHTML     = buildRows(bidLevels, 'bid-price');
-  document.getElementById('dp-ask').innerHTML     = buildRows(askLevels, 'ask-price');
-  document.getElementById('dp-bid-total').textContent = '—';
-  document.getElementById('dp-ask-total').textContent = '—';
-  document.getElementById('dp-agg-buy').textContent  = quoteCandle ? fmtVol(quoteCandle.buy_quantity)  : '—';
-  document.getElementById('dp-agg-sell').textContent = quoteCandle ? fmtVol(quoteCandle.sell_quantity) : '—';
-  document.getElementById('dp-vol').textContent       = vol != null ? fmtVol(vol) : '—';
-
-  const panel = document.getElementById('depth-panel');
-  panel.classList.add('visible');
-  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+function showSnap(sym, time){
+  const q = (_quoteData[sym]||[]).find(c=>c.candle_time===time);
+  document.getElementById('sp-title').textContent = sym+' — '+time;
+  document.getElementById('sp-buy').textContent   = q ? fmtVol(q.buy_quantity)  : '—';
+  document.getElementById('sp-sell').textContent  = q ? fmtVol(q.sell_quantity) : '—';
+  document.getElementById('sp-vol').textContent   = q ? fmtVol(q.volume)        : '—';
+  document.getElementById('sp-ltp').textContent   = q && q.last_price ? '₹'+q.last_price.toFixed(2) : '—';
+  document.getElementById('snap-panel').classList.add('visible');
 }
 
-function closeDepth() {
-  document.getElementById('depth-panel').classList.remove('visible');
-}
-
-async function loadQuote() {
-  try {
-    const qData = await fetch('/api/live-candles/quote-by-symbol').then(r => r.json());
+async function loadAll(){
+  try{
+    const qData = await fetch('/api/live-candles/quote-by-symbol').then(r=>r.json());
     _quoteData = qData;
-    if (Object.keys(qData).length) {
+    if(Object.keys(qData).length){
       renderChart('cv-buy',  qData, 'buy_quantity',  fmtVol);
       renderChart('cv-sell', qData, 'sell_quantity', fmtVol);
       renderChart('cv-vol',  qData, 'volume',        fmtVol);
     }
-    document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    document.getElementById('st').textContent = 'Load error: ' + e.message;
+    document.getElementById('st').textContent = 'Updated '+new Date().toLocaleTimeString();
+  }catch(e){
+    document.getElementById('st').textContent = 'Error: '+e.message;
   }
 }
 
-async function loadAll() {
-  try {
-    const qData = await fetch('/api/live-candles/quote-by-symbol').then(r => r.json());
-    _quoteData = qData;
-    if (Object.keys(qData).length) {
-      renderChart('cv-buy',  qData, 'buy_quantity',  fmtVol);
-      renderChart('cv-sell', qData, 'sell_quantity', fmtVol);
-      renderChart('cv-vol',  qData, 'volume',        fmtVol);
-    }
-    document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch(e) {
-    document.getElementById('st').textContent = 'Load error: ' + e.message;
-  }
-}
-
-const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const wsProto = location.protocol==='https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${wsProto}://${location.host}/ws/live-candles`);
-ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent = 'Live'; };
-ws.onclose = () => { document.getElementById('dot').classList.remove('live'); setInterval(loadAll, 30000); };
-ws.onmessage = e => {
-  try {
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'tick_flush') { loadQuote(); }
-    else { loadAll(); }
-  } catch { loadAll(); }
-};
+ws.onopen  = ()=>{ document.getElementById('dot').classList.add('live'); document.getElementById('st').textContent='Live'; };
+ws.onclose = ()=>{ document.getElementById('dot').classList.remove('live'); setInterval(loadAll,30000); };
+ws.onmessage = e=>{ try{ loadAll(); }catch{} };
 
 loadAll();
 </script>
