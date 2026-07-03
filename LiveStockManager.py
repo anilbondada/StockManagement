@@ -663,7 +663,6 @@ def volume_chart_ui():
 const COLORS = ['#818cf8','#34d399','#f472b6','#fb923c','#38bdf8','#a78bfa','#4ade80','#facc15'];
 const charts = {};
 let _quoteData = {};  // latest quote snapshot data, keyed by symbol
-let _volData   = {};  // latest traded volume data, keyed by symbol
 
 function fmtVol(v){
   if(v==null||v===0) return '0';
@@ -741,9 +740,7 @@ function renderChart(id, data, valueKey, fmtFn) {
 function showDepth(sym, time) {
   const quoteCandles = _quoteData[sym] || [];
   const quoteCandle  = quoteCandles.find(c => c.candle_time === time);
-  const volCandles = _volData[sym] || [];
-  const volCandle  = volCandles.find(c => c.candle_time === time);
-  const vol = volCandle ? volCandle.volume : null;
+  const vol = quoteCandle ? quoteCandle.volume : null;
 
   document.getElementById('dp-title').textContent = sym + '  —  ' + time;
   document.getElementById('dp-meta').textContent  = 'Quote snapshot at candle close · click another point to update';
@@ -781,6 +778,7 @@ async function loadQuote() {
     if (Object.keys(qData).length) {
       renderChart('cv-buy',  qData, 'buy_quantity',  fmtVol);
       renderChart('cv-sell', qData, 'sell_quantity', fmtVol);
+      renderChart('cv-vol',  qData, 'volume',        fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
@@ -790,17 +788,12 @@ async function loadQuote() {
 
 async function loadAll() {
   try {
-    const [volData, qData] = await Promise.all([
-      fetch('/api/live-candles/by-symbol').then(r => r.json()),
-      fetch('/api/live-candles/quote-by-symbol').then(r => r.json()),
-    ]);
-    _volData   = volData;
+    const qData = await fetch('/api/live-candles/quote-by-symbol').then(r => r.json());
     _quoteData = qData;
-    if (Object.keys(volData).length)
-      renderChart('cv-vol',  volData, 'volume',        fmtVol);
     if (Object.keys(qData).length) {
-      renderChart('cv-buy',  qData,  'buy_quantity',  fmtVol);
-      renderChart('cv-sell', qData,  'sell_quantity', fmtVol);
+      renderChart('cv-buy',  qData, 'buy_quantity',  fmtVol);
+      renderChart('cv-sell', qData, 'sell_quantity', fmtVol);
+      renderChart('cv-vol',  qData, 'volume',        fmtVol);
     }
     document.getElementById('st').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
