@@ -510,9 +510,10 @@ def sip_status():
                 "sl_sell_order_id": sl_sell_oid,
             }
 
-    all_symbols = (set(db_by_symbol.keys())
-                   | set(_sip_flows.keys())
-                   | _sip_disabled_stocks)
+    # Use today's DB records as the authoritative symbol list.
+    # In-memory _sip_flows / _sip_disabled_stocks may carry yesterday's entries
+    # when the server hasn't restarted — DB filter keeps the UI to today only.
+    all_symbols = set(db_by_symbol.keys())
     stocks = []
     for sym in sorted(all_symbols):
         db  = db_by_symbol.get(sym, {})
