@@ -473,8 +473,8 @@ def _fetch_complete_candle(data: dict):
                         trigger_price    = sl_buy_trigger,
                     )
                     print(f"[sip-sl] {symbol}: SL-BUY order_id={sl_buy_id} trigger={sl_buy_trigger} (day_high={day_high})")
-                    sl_sell_trigger = round(c["close"] - 1,   2)
-                    sl_sell_limit   = round(c["close"] - 1.5, 2)
+                    sl_sell_trigger = round(c["low"] - 1,   2)
+                    sl_sell_limit   = round(c["low"] - 1.5, 2)
                     try:
                         current_ltp = kite.quote(f"NSE:{symbol}")[f"NSE:{symbol}"]["last_price"]
                     except Exception:
