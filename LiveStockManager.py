@@ -172,9 +172,12 @@ def _quote_poll_loop():
     ist = timezone(timedelta(hours=5, minutes=30))
     while True:
         now = datetime.now(ist).replace(tzinfo=None)
-        if now.hour >= 16:  # stop at 4 PM IST
-            print("[quote-poll] 4 PM IST reached — stopping poll loop")
-            return
+        if now.hour >= 16:  # after 4 PM — sleep until 9:15 AM next day
+            tomorrow = (now + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+            wait_secs = (tomorrow - now).total_seconds()
+            print(f"[quote-poll] 4 PM IST — sleeping until {tomorrow.strftime('%Y-%m-%d 09:15')} IST")
+            time.sleep(wait_secs)
+            continue
 
         mins_to_next = 5 - (now.minute % 5)
         next_boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=mins_to_next)
