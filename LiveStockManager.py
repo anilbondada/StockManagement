@@ -442,7 +442,12 @@ async def eod_cleanup():
                     pass
         _active_subs.clear()
         _tick_candles.clear()
-        print("[live] EOD cleanup complete")
+
+        # Clear disabled/cancelled stock sets so they don't block next day's orders
+        import StockInPlay as _sip
+        _main._eb_disabled_stocks.clear()
+        _sip._sip_disabled_stocks.clear()
+        print("[live] EOD cleanup complete — disabled stock sets cleared for next day")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
