@@ -1125,7 +1125,11 @@ def _render_eb_stocks_table(stocks: list) -> str:
     rows = []
     for st in stocks:
         status   = st.get("order_status") or "pending"
-        alert_ts = (st.get("received_at") or "").replace("T"," ")[11:16] or "—"
+        try:
+            _ist = timezone(timedelta(hours=5, minutes=30))
+            alert_ts = datetime.fromisoformat(st.get("received_at") or "").astimezone(_ist).strftime("%H:%M")
+        except Exception:
+            alert_ts = "—"
         pct      = st.get("pct_change")
         pct_str  = f"{pct:+.1f}%" if pct is not None else "—"
         reason   = st.get("skip_reason") or ""
