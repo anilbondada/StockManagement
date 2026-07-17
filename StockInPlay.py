@@ -607,7 +607,7 @@ def sip_resume():
     with _db() as conn:
         rows = conn.execute("""
             SELECT symbol, limit_order_id FROM sip_flows
-            WHERE status IN ('paused', 'limit_placed', 'waiting')
+            WHERE status IN ('paused', 'limit_placed', 'waiting', 'error')
             AND DATE(created_at) = ?
             AND id IN (SELECT MAX(id) FROM sip_flows GROUP BY symbol)
         """, (today,)).fetchall()
