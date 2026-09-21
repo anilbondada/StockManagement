@@ -3704,10 +3704,10 @@ def margin_check(tradingsymbol: str):
     quote = kite.quote(f"NSE:{sym}")
     ltp = quote[f"NSE:{sym}"]["last_price"]
 
-    # qty from config (EB uses qty_for_ltp, SIP uses qty_for_ltp_sip — use EB as default)
+    # qty from config
     qty = qty_for_ltp(ltp)
 
-    # margin required for this order
+    # margin required for MIS (intraday) order
     order_margins = kite.order_margins([{
         "exchange":         "NSE",
         "tradingsymbol":    sym,
@@ -3717,19 +3717,34 @@ def margin_check(tradingsymbol: str):
         "order_type":       "LIMIT",
         "quantity":         qty,
         "price":            ltp,
+        "trigger_price":    0,
     }])
-    required = order_margins[0]["total"] if order_margins else 0
+
+    m = order_margins[0] if order_margins else {}
+    required  = m.get("total", 0)
+    leverage  = m.get("leverage", 1)
+    span      = m.get("span", 0)
+    exposure  = m.get("exposure", 0)
+    var       = m.get("var", 0)
+    charges   = m.get("charges", {})
+    brokerage = charges.get("brokerage", 0) if isinstance(charges, dict) else 0
 
     # available equity balance
-    equity = kite.margins("equity")
+    equity    = kite.margins("equity")
     available = equity["available"]["live_balance"]
 
     return {
-        "symbol":    sym,
-        "ltp":       ltp,
-        "quantity":  qty,
-        "required":  round(required, 2),
-        "available": round(available, 2),
+        "symbol":     sym,
+        "ltp":        ltp,
+        "quantity":   qty,
+        "product":    "MIS",
+        "leverage":   leverage,
+        "span":       round(span, 2),
+        "exposure":   round(exposure, 2),
+        "var":        round(var, 2),
+        "brokerage":  round(brokerage, 2),
+        "required":   round(required, 2),
+        "available":  round(available, 2),
         "sufficient": available >= required,
     }
 
