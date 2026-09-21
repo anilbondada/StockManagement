@@ -3470,3 +3470,546 @@ def morning_stars_analysis(request: MorningStarsRequest):
             results.append(MorningStarsResponse(**base, error=str(e)))
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SWING ANALYSIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SwingAnalysisRequest(BaseModel):
+    symbols: List[str]
+    date: Optional[str] = None   # "YYYY-MM-DD"; defaults to today when omitted
+
+
+@app.post("/api/swing-analysis")
+def swing_analysis_api(request: SwingAnalysisRequest):
+    import datetime as _dt
+    import SwingAnalysis as sa
+
+    kite = get_kite()
+
+    shortlist_date = (
+        _dt.date.fromisoformat(request.date)
+        if request.date
+        else _dt.date.today()
+    )
+    today = _dt.date.today()
+
+    symbols = [s.strip().upper() for s in request.symbols if s.strip()]
+    results = []
+    for symbol in symbols:
+        try:
+            result = sa.analyze_stock(kite, symbol, shortlist_date, today=today)
+        except Exception as e:
+            result = {"Symbol": symbol, "ShortlistDate": str(shortlist_date), "Error": str(e)}
+        # Convert date objects to ISO strings for JSON serialisation
+        for k, v in result.items():
+            if hasattr(v, "isoformat"):
+                result[k] = v.isoformat()
+        results.append(result)
+
+    return results
+
+
+@app.get("/swing-analysis", response_class=HTMLResponse)
+def swing_analysis_ui():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Swing Analysis</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;padding:24px 16px;min-height:100vh}
+h1{font-size:1.4rem;font-weight:700;color:#1a1a2e}
+.sub{font-size:.82rem;color:#6b7280;margin-top:2px}
+
+/* ── input panel ── */
+.panel{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.07);padding:22px 24px;margin-bottom:20px}
+.panel-title{font-size:.95rem;font-weight:700;color:#374151;margin-bottom:14px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:.78rem;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.04em}
+input[type=date],input[type=text]{padding:8px 12px;border:1.5px solid #e5e7eb;border-radius:8px;font-size:.88rem;outline:none;background:#fff;color:#1a1a2e}
+input[type=date]:focus,input[type=text]:focus{border-color:#4f46e5}
+
+/* tag input */
+.tag-wrap{display:flex;flex-wrap:wrap;gap:6px;min-height:40px;border:1.5px solid #e5e7eb;border-radius:8px;padding:6px 10px;cursor:text;background:#fff;align-items:center;min-width:320px}
+.tag-wrap:focus-within{border-color:#4f46e5}
+.tag{background:#e0e7ff;color:#3730a3;padding:3px 10px;border-radius:999px;font-size:.8rem;font-weight:600;display:flex;align-items:center;gap:5px}
+.tag button{background:none;border:none;color:#6366f1;cursor:pointer;font-size:.85rem;line-height:1;padding:0}
+.tag button:hover{color:#dc2626}
+#symInput{border:none;outline:none;font-size:.88rem;min-width:120px;flex:1;color:#1a1a2e;background:transparent;padding:2px 0}
+.hint{font-size:.75rem;color:#9ca3af;margin-top:4px}
+
+/* buttons */
+.btn{padding:9px 20px;border:none;border-radius:8px;font-size:.88rem;font-weight:700;cursor:pointer;transition:.15s}
+.btn-primary{background:#4f46e5;color:#fff}
+.btn-primary:hover:not(:disabled){background:#4338ca}
+.btn-primary:disabled{background:#a5b4fc;cursor:not-allowed}
+.btn-outline{background:#fff;color:#4f46e5;border:1.5px solid #4f46e5}
+.btn-outline:hover{background:#eef2ff}
+.btn-sm{padding:5px 12px;font-size:.8rem}
+#csvInput{display:none}
+
+/* progress */
+.progress-wrap{display:none;align-items:center;gap:10px;margin-top:8px}
+.spinner{width:16px;height:16px;border:2.5px solid #e5e7eb;border-top-color:#4f46e5;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.progress-text{font-size:.85rem;color:#6b7280}
+
+/* results */
+.results-panel{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.07);overflow:hidden}
+.results-header{display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid #f3f4f6;flex-wrap:wrap;gap:8px}
+.results-title{font-size:.95rem;font-weight:700;color:#374151}
+.results-meta{font-size:.8rem;color:#6b7280}
+
+/* table */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.83rem}
+thead th{background:#f8f9fb;padding:10px 14px;text-align:left;font-weight:700;color:#6b7280;text-transform:uppercase;font-size:.72rem;letter-spacing:.05em;white-space:nowrap;border-bottom:1.5px solid #e5e7eb;cursor:pointer;user-select:none}
+thead th:hover{background:#f1f5f9;color:#4f46e5}
+thead th .sort-arrow{margin-left:4px;opacity:.4}
+thead th.sorted .sort-arrow{opacity:1;color:#4f46e5}
+tbody tr{border-bottom:1px solid #f3f4f6;transition:background .1s}
+tbody tr:hover{background:#f8f9ff}
+tbody tr.detail-row{background:#f8f9fb}
+tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#374151}
+.expand-btn{background:none;border:1.5px solid #e5e7eb;border-radius:6px;cursor:pointer;padding:2px 8px;font-size:.75rem;color:#6b7280;transition:.1s}
+.expand-btn:hover{border-color:#4f46e5;color:#4f46e5}
+
+/* badges */
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.75rem;font-weight:700}
+.badge-green{background:#dcfce7;color:#166534}
+.badge-red{background:#fee2e2;color:#991b1b}
+.badge-gray{background:#f3f4f6;color:#6b7280}
+.badge-yellow{background:#fef9c3;color:#854d0e}
+.badge-blue{background:#dbeafe;color:#1e40af}
+.badge-purple{background:#ede9fe;color:#5b21b6}
+.badge-orange{background:#ffedd5;color:#9a3412}
+
+/* detail row */
+.detail-inner{padding:16px 20px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;flex-wrap:wrap}
+@media(max-width:700px){.detail-grid{grid-template-columns:1fr}}
+.detail-section{margin-bottom:8px}
+.detail-section-title{font-size:.78rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #e5e7eb}
+.fib-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.fib-table th{background:#f1f5f9;padding:5px 10px;text-align:left;color:#6b7280;font-weight:600}
+.fib-table td{padding:4px 10px;border-top:1px solid #f3f4f6}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.info-item{background:#f8f9fb;border-radius:8px;padding:8px 12px}
+.info-label{font-size:.72rem;color:#9ca3af;font-weight:600;text-transform:uppercase;margin-bottom:2px}
+.info-value{font-size:.88rem;font-weight:700;color:#374151}
+
+.empty{text-align:center;padding:60px;color:#9ca3af}
+.error-row td{color:#dc2626;background:#fff5f5}
+</style>
+</head>
+<body>
+
+<div style="margin-bottom:20px">
+  <h1>Swing Analysis</h1>
+  <div class="sub">Fibonacci retracement &amp; gain analysis · Weinstein Stage · 52-week context</div>
+</div>
+
+<!-- Input panel -->
+<div class="panel">
+  <div class="panel-title">Symbols &amp; Date</div>
+  <div class="row">
+    <div class="field" style="flex:1;min-width:280px">
+      <label>Symbols</label>
+      <div class="tag-wrap" id="tagWrap" onclick="document.getElementById('symInput').focus()">
+        <input id="symInput" placeholder="Type symbol and press Enter…" autocomplete="off"
+               onkeydown="handleKey(event)" oninput="this.value=this.value.toUpperCase()"/>
+      </div>
+      <div class="hint">Press <strong>Enter</strong> or <strong>comma</strong> to add · click × to remove</div>
+    </div>
+
+    <div class="field">
+      <label>Shortlist / Scanner Date</label>
+      <input type="date" id="dateInput" title="Leave blank to use today's date"/>
+      <div class="hint">Optional — defaults to today</div>
+    </div>
+
+    <div class="field" style="justify-content:flex-end;padding-bottom:20px">
+      <input type="file" id="csvInput" accept=".csv,.txt" onchange="loadCSV(event)"/>
+      <button class="btn btn-outline" onclick="document.getElementById('csvInput').click()">Upload CSV</button>
+    </div>
+
+    <div class="field" style="justify-content:flex-end;padding-bottom:20px">
+      <button class="btn btn-primary" id="runBtn" onclick="runAnalysis()" disabled>Run Analysis</button>
+    </div>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="spinner"></div>
+    <span class="progress-text" id="progressText">Analysing…</span>
+  </div>
+</div>
+
+<!-- Results -->
+<div id="resultsSection"></div>
+
+<script>
+const symbols = [];
+let allResults = [];
+let sortCol = null, sortAsc = true;
+
+// ── Tag input ──────────────────────────────────────────────────────────────
+function addSymbol(raw) {
+  const parts = raw.split(/[,\\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+  parts.forEach(sym => {
+    if (sym && !symbols.includes(sym)) {
+      symbols.push(sym);
+    }
+  });
+  renderTags();
+  updateRunBtn();
+}
+
+function removeSymbol(sym) {
+  const i = symbols.indexOf(sym);
+  if (i >= 0) symbols.splice(i, 1);
+  renderTags();
+  updateRunBtn();
+}
+
+function renderTags() {
+  const wrap = document.getElementById('tagWrap');
+  wrap.querySelectorAll('.tag').forEach(t => t.remove());
+  const input = document.getElementById('symInput');
+  symbols.forEach(sym => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = sym + '<button onclick="removeSymbol(\\''+sym+'\\')" title="Remove">×</button>';
+    wrap.insertBefore(tag, input);
+  });
+}
+
+function handleKey(e) {
+  const val = e.target.value.trim();
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    if (val) { addSymbol(val); e.target.value = ''; }
+  } else if (e.key === 'Backspace' && !val && symbols.length) {
+    removeSymbol(symbols[symbols.length - 1]);
+  }
+}
+
+function updateRunBtn() {
+  document.getElementById('runBtn').disabled = symbols.length === 0;
+}
+
+// ── CSV loader ─────────────────────────────────────────────────────────────
+function loadCSV(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const lines = ev.target.result.split(/\\r?\\n/);
+    const firstLine = (lines[0] || '').split(',');
+    // detect header row
+    const colIdx = firstLine.findIndex(c => /symbol/i.test(c.trim()));
+    lines.forEach((line, i) => {
+      if (i === 0 && colIdx >= 0) return; // skip header
+      const cols = line.split(',');
+      const sym = (colIdx >= 0 ? cols[colIdx] : cols[0] || '').trim().toUpperCase();
+      if (sym && /^[A-Z0-9&-]+$/.test(sym) && !symbols.includes(sym)) {
+        symbols.push(sym);
+      }
+    });
+    renderTags();
+    updateRunBtn();
+    document.getElementById('csvInput').value = '';
+  };
+  reader.readAsText(file);
+}
+
+// ── Analysis ───────────────────────────────────────────────────────────────
+async function runAnalysis() {
+  if (!symbols.length) return;
+  const dateVal = document.getElementById('dateInput').value || null;
+  document.getElementById('runBtn').disabled = true;
+  const pw = document.getElementById('progressWrap');
+  pw.style.display = 'flex';
+  document.getElementById('progressText').textContent =
+    'Fetching instrument list and analysing ' + symbols.length + ' symbol' + (symbols.length > 1 ? 's' : '') + '…';
+  document.getElementById('resultsSection').innerHTML = '';
+
+  try {
+    const res = await fetch('/api/swing-analysis', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ symbols, date: dateVal })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({detail: res.statusText}));
+      throw new Error(err.detail || res.statusText);
+    }
+    allResults = await res.json();
+    renderResults(allResults);
+  } catch(err) {
+    document.getElementById('resultsSection').innerHTML =
+      '<div class="panel" style="color:#dc2626">Error: ' + err.message + '</div>';
+  } finally {
+    pw.style.display = 'none';
+    document.getElementById('runBtn').disabled = false;
+  }
+}
+
+// ── Render results ─────────────────────────────────────────────────────────
+function stageClass(stage) {
+  if (!stage) return 'badge-gray';
+  if (/Stage 2|Advancing/i.test(stage)) return 'badge-green';
+  if (/Stage 4|Declining/i.test(stage)) return 'badge-red';
+  if (/Stage 3|Topping|Distribution/i.test(stage)) return 'badge-orange';
+  if (/Transition/i.test(stage)) return 'badge-yellow';
+  if (/Stage 1|Basing|Accumulation/i.test(stage)) return 'badge-blue';
+  return 'badge-gray';
+}
+
+function shortStage(stage) {
+  if (!stage) return '—';
+  if (/Insufficient/i.test(stage)) return 'N/A';
+  return stage.replace(/Stage (\\d).*?\\(([^)]+)\\).*/, 'S$1 $2')
+              .replace(/Stage.*?Transition.*?\\(([^)]+)\\).*/, 'Transition');
+}
+
+function yesNo(v) {
+  if (!v || v === 'No data yet') return '<span class="badge badge-gray">' + (v || '—') + '</span>';
+  if (v === 'Yes') return '<span class="badge badge-green">Yes</span>';
+  if (v === 'No')  return '<span class="badge badge-red">No</span>';
+  return v;
+}
+
+function fmt(v, decimals) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return decimals !== undefined ? v.toFixed(decimals) : v;
+  return v;
+}
+
+function fmtPct(v) {
+  if (v === null || v === undefined) return '—';
+  return typeof v === 'number' ? v.toFixed(1) + '%' : v;
+}
+
+const FIB_RET_LEVELS  = [0,23.6,38.2,50,61.8,78.6,100,-23.6,-38.2,-50,-61.8,-78.6,-100];
+const FIB_GAIN_LEVELS = [0,23.6,38.2,50,61.8,78.6,100,123.6,138.2,150,161.8,178.6,200,223.6,238.2,250,261.8];
+
+function buildDetailHTML(r) {
+  if (r.Error) return '<td colspan="9"><em>' + r.Error + '</em></td>';
+
+  // Retracement table
+  const retRows = FIB_RET_LEVELS.map(lvl => {
+    const k = 'Fib_Retracement_' + lvl + '%';
+    const d = r[k + '_Date'];
+    const hit = r[k];
+    return '<tr><td>' + lvl + '%</td>' +
+           '<td>' + yesNo(hit) + '</td>' +
+           '<td>' + (d || '—') + '</td></tr>';
+  }).join('');
+
+  // Gain table
+  const gainRows = FIB_GAIN_LEVELS.map(lvl => {
+    const k = 'Fib_Gain_' + lvl + '%';
+    const d = r[k + '_Date'];
+    const hit = r[k];
+    return '<tr><td>' + lvl + '%</td>' +
+           '<td>' + yesNo(hit) + '</td>' +
+           '<td>' + (d || '—') + '</td></tr>';
+  }).join('');
+
+  return `
+  <td colspan="9">
+    <div class="detail-inner">
+      <div class="detail-grid">
+        <div class="detail-section">
+          <div class="detail-section-title">Fibonacci Retracement</div>
+          <table class="fib-table">
+            <thead><tr><th>Level</th><th>Reached?</th><th>Date</th></tr></thead>
+            <tbody>${retRows}</tbody>
+          </table>
+        </div>
+        <div class="detail-section">
+          <div class="detail-section-title">Fibonacci Gain / Extension</div>
+          <table class="fib-table">
+            <thead><tr><th>Level</th><th>Reached?</th><th>Date</th></tr></thead>
+            <tbody>${gainRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="detail-section" style="margin-top:14px">
+        <div class="detail-section-title">Context</div>
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">Prev Day Close</div><div class="info-value">${fmt(r.PrevDayClose,2)}</div></div>
+          <div class="info-item"><div class="info-label">Prev Trading Date</div><div class="info-value">${r.PrevTradingDate||'—'}</div></div>
+          <div class="info-item"><div class="info-label">52W High</div><div class="info-value">${fmt(r.High52W,2)}</div></div>
+          <div class="info-item"><div class="info-label">52W Low</div><div class="info-value">${fmt(r.Low52W,2)}</div></div>
+          <div class="info-item"><div class="info-label">Open Fib %</div><div class="info-value">${fmtPct(r.OpenFibPct)} (${r.OpenNearestFibLevel !== null && r.OpenNearestFibLevel !== undefined ? r.OpenNearestFibLevel+'%' : '—'})</div></div>
+          <div class="info-item"><div class="info-label">MA 30W</div><div class="info-value">${fmt(r.MA30W,2)}</div></div>
+          <div class="info-item"><div class="info-label">Price vs MA</div><div class="info-value">${fmtPct(r.PriceVsMA30WPct)}</div></div>
+          <div class="info-item"><div class="info-label">MA Slope</div><div class="info-value">${fmtPct(r.MA30WSlopePct)}</div></div>
+          <div class="info-item"><div class="info-label">Wyckoff Phase</div><div class="info-value">${r.WyckoffPhase||'—'}</div></div>
+        </div>
+      </div>
+    </div>
+  </td>`;
+}
+
+function renderResults(data) {
+  if (!data.length) {
+    document.getElementById('resultsSection').innerHTML =
+      '<div class="results-panel"><div class="empty">No results.</div></div>';
+    return;
+  }
+
+  const ok    = data.filter(r => !r.Error).length;
+  const errs  = data.length - ok;
+  const date  = data[0].ShortlistDate || '';
+
+  let html = `
+  <div class="results-panel">
+    <div class="results-header">
+      <div>
+        <div class="results-title">Results</div>
+        <div class="results-meta">${data.length} symbols · ${ok} analysed · ${errs} error${errs!==1?'s':''} · Date: ${date}</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="exportCSV()">Export CSV</button>
+    </div>
+    <div class="tbl-wrap">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th></th>
+            <th onclick="sortBy('Symbol')">Symbol <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('GapUp')">Gap Up <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('EntryTriggered')">Entry Triggered <span class="sort-arrow">↕</span></th>
+            <th>Entry Date</th>
+            <th onclick="sortBy('MAX_FBR')">Max Retracement <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('MAX_FBG')">Max Gain % <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('AbsoluteHighAfter')">Abs High <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('WeinsteinStage')">Stage <span class="sort-arrow">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+  </div>`;
+
+  document.getElementById('resultsSection').innerHTML = html;
+  renderTableBody(data);
+}
+
+function renderTableBody(data) {
+  const tbody = document.getElementById('resultsBody');
+  if (!tbody) return;
+
+  let rows = '';
+  data.forEach((r, i) => {
+    const hasErr = !!r.Error;
+    const rowClass = hasErr ? 'error-row' : '';
+    const detailId = 'detail-' + i;
+
+    if (hasErr) {
+      rows += `<tr class="${rowClass}" data-idx="${i}">
+        <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
+        <td><strong>${r.Symbol}</strong></td>
+        <td colspan="7" style="color:#dc2626">${r.Error}</td>
+      </tr>
+      <tr id="${detailId}" style="display:none" class="detail-row"><td colspan="9"><div class="detail-inner" style="color:#dc2626">${r.Error}</div></td></tr>`;
+    } else {
+      const stageShort = shortStage(r.WeinsteinStage);
+      const sClass = stageClass(r.WeinsteinStage);
+      const maxFbr = r.MAX_FBR !== null && r.MAX_FBR !== undefined && r.MAX_FBR !== 'No data yet'
+        ? r.MAX_FBR + '%' : (r.MAX_FBR || '—');
+      const maxFbg = r.MAX_FBG !== null && r.MAX_FBG !== undefined && r.MAX_FBG !== 'No data yet'
+        ? (typeof r.MAX_FBG === 'number' ? r.MAX_FBG.toFixed(1) + '%' : r.MAX_FBG) : '—';
+
+      rows += `<tr data-idx="${i}">
+        <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
+        <td><strong>${r.Symbol}</strong></td>
+        <td>${yesNo(r.GapUp)}</td>
+        <td>${yesNo(r.EntryTriggered)}</td>
+        <td>${r.EntryTriggerDate || '—'}</td>
+        <td>${maxFbr}</td>
+        <td style="font-weight:700;color:${typeof r.MAX_FBG==='number'&&r.MAX_FBG>0?'#16a34a':'inherit'}">${maxFbg}</td>
+        <td>${fmt(r.AbsoluteHighAfter,2)}</td>
+        <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
+      </tr>
+      <tr id="${detailId}" style="display:none" class="detail-row">
+        ${buildDetailHTML(r)}
+      </tr>`;
+    }
+  });
+
+  tbody.innerHTML = rows;
+}
+
+function toggleDetail(i) {
+  const row = document.getElementById('detail-' + i);
+  const btn = document.querySelector('[data-idx="' + i + '"] .expand-btn');
+  if (!row) return;
+  const hidden = row.style.display === 'none';
+  row.style.display = hidden ? 'table-row' : 'none';
+  if (btn) btn.textContent = hidden ? '−' : '+';
+}
+
+// ── Sorting ────────────────────────────────────────────────────────────────
+function sortBy(col) {
+  if (sortCol === col) sortAsc = !sortAsc;
+  else { sortCol = col; sortAsc = true; }
+
+  // update header arrows
+  document.querySelectorAll('thead th').forEach(th => {
+    th.classList.remove('sorted');
+    const arrow = th.querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = '↕';
+  });
+  const ths = document.querySelectorAll('thead th');
+  const colNames = ['', 'Symbol', 'GapUp', 'EntryTriggered', 'EntryDate', 'MAX_FBR', 'MAX_FBG', 'AbsoluteHighAfter', 'WeinsteinStage'];
+  const idx = colNames.indexOf(col);
+  if (idx >= 0) {
+    ths[idx].classList.add('sorted');
+    const arrow = ths[idx].querySelector('.sort-arrow');
+    if (arrow) arrow.textContent = sortAsc ? '↑' : '↓';
+  }
+
+  const sorted = [...allResults].sort((a, b) => {
+    let av = a[col], bv = b[col];
+    if (av === null || av === undefined) av = '';
+    if (bv === null || bv === undefined) bv = '';
+    if (typeof av === 'number' && typeof bv === 'number')
+      return sortAsc ? av - bv : bv - av;
+    return sortAsc
+      ? String(av).localeCompare(String(bv))
+      : String(bv).localeCompare(String(av));
+  });
+
+  renderTableBody(sorted);
+}
+
+// ── Export CSV ─────────────────────────────────────────────────────────────
+function exportCSV() {
+  if (!allResults.length) return;
+  const keys = Object.keys(allResults[0]);
+  const rows = [keys.join(',')];
+  allResults.forEach(r => {
+    rows.push(keys.map(k => {
+      const v = r[k];
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return s.includes(',') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(','));
+  });
+  const blob = new Blob([rows.join('\\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'swing_analysis.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>"""
