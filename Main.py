@@ -4047,7 +4047,7 @@ const FIB_RET_LEVELS  = [0,23.6,38.2,50,61.8,78.6,100,-23.6,-38.2,-50,-61.8,-78.
 const FIB_GAIN_LEVELS = [0,23.6,38.2,50,61.8,78.6,100,123.6,138.2,150,161.8,178.6,200,223.6,238.2,250,261.8];
 
 function buildDetailHTML(r) {
-  if (r.Error) return '<td colspan="9"><em>' + r.Error + '</em></td>';
+  if (r.Error) return '<td colspan="6"><em>' + r.Error + '</em></td>';
 
   // Retracement table
   const retRows = FIB_RET_LEVELS.map(lvl => {
@@ -4070,7 +4070,7 @@ function buildDetailHTML(r) {
   }).join('');
 
   return `
-  <td colspan="9">
+  <td colspan="6">
     <div class="detail-inner">
       <div class="detail-grid">
         <div class="detail-section">
@@ -4134,11 +4134,8 @@ function renderResults(data) {
             <th onclick="sortBy('Symbol')">Symbol <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('WeinsteinStage')">Stage <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('GapUp')">Gap Up <span class="sort-arrow">↕</span></th>
-            <th onclick="sortBy('EntryTriggered')">Entry Triggered <span class="sort-arrow">↕</span></th>
-            <th>Entry Date</th>
-            <th onclick="sortBy('MAX_FBR')">Max Retracement <span class="sort-arrow">↕</span></th>
-            <th onclick="sortBy('MAX_FBG')">Max Gain % <span class="sort-arrow">↕</span></th>
-            <th onclick="sortBy('AbsoluteHighAfter')">Abs High <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('ShortlistDayHigh')">Day High <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('ShortlistDayLow')">Day Low <span class="sort-arrow">↕</span></th>
           </tr>
         </thead>
         <tbody id="resultsBody"></tbody>
@@ -4164,27 +4161,20 @@ function renderTableBody(data) {
       rows += `<tr class="${rowClass}" data-idx="${i}">
         <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
         <td><strong>${r.Symbol}</strong></td>
-        <td colspan="7" style="color:#dc2626">${r.Error}</td>
+        <td colspan="4" style="color:#dc2626">${r.Error}</td>
       </tr>
-      <tr id="${detailId}" style="display:none" class="detail-row"><td colspan="9"><div class="detail-inner" style="color:#dc2626">${r.Error}</div></td></tr>`;
+      <tr id="${detailId}" style="display:none" class="detail-row"><td colspan="6"><div class="detail-inner" style="color:#dc2626">${r.Error}</div></td></tr>`;
     } else {
       const stageShort = shortStage(r.WeinsteinStage);
       const sClass = stageClass(r.WeinsteinStage);
-      const maxFbr = r.MAX_FBR !== null && r.MAX_FBR !== undefined && r.MAX_FBR !== 'No data yet'
-        ? r.MAX_FBR + '%' : (r.MAX_FBR || '—');
-      const maxFbg = r.MAX_FBG !== null && r.MAX_FBG !== undefined && r.MAX_FBG !== 'No data yet'
-        ? (typeof r.MAX_FBG === 'number' ? r.MAX_FBG.toFixed(1) + '%' : r.MAX_FBG) : '—';
 
       rows += `<tr data-idx="${i}">
         <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
         <td><strong>${r.Symbol}</strong></td>
         <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
         <td>${yesNo(r.GapUp)}</td>
-        <td>${yesNo(r.EntryTriggered)}</td>
-        <td>${r.EntryTriggerDate || '—'}</td>
-        <td>${maxFbr}</td>
-        <td style="font-weight:700;color:${typeof r.MAX_FBG==='number'&&r.MAX_FBG>0?'#16a34a':'inherit'}">${maxFbg}</td>
-        <td>${fmt(r.AbsoluteHighAfter,2)}</td>
+        <td>${fmt(r.ShortlistDayHigh,2)}</td>
+        <td>${fmt(r.ShortlistDayLow,2)}</td>
       </tr>
       <tr id="${detailId}" style="display:none" class="detail-row">
         ${buildDetailHTML(r)}
@@ -4216,7 +4206,7 @@ function sortBy(col) {
     if (arrow) arrow.textContent = '↕';
   });
   const ths = document.querySelectorAll('thead th');
-  const colNames = ['', 'Symbol', 'WeinsteinStage', 'GapUp', 'EntryTriggered', 'EntryDate', 'MAX_FBR', 'MAX_FBG', 'AbsoluteHighAfter'];
+  const colNames = ['', 'Symbol', 'WeinsteinStage', 'GapUp', 'ShortlistDayHigh', 'ShortlistDayLow'];
   const idx = colNames.indexOf(col);
   if (idx >= 0) {
     ths[idx].classList.add('sorted');
