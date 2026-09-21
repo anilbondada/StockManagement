@@ -3780,22 +3780,22 @@ def get_margins_api(request: MarginRequest):
             "trigger_price":    0,
         })
 
-    cfg        = get_config()
-    min_margin = float(cfg.get("min_margin", 0))
+    cfg          = get_config()
+    min_leverage = float(cfg.get("min_margin", 2.5))
 
     margins = kite.order_margins(orders)
     for i, s in enumerate(syms):
         m        = margins[i] if i < len(margins) else {}
         leverage = m.get("leverage", 1)
         required = round(m.get("total", 0), 2)
-        # within_limit: True when min_margin=0 (disabled) OR required <= min_margin
-        within_limit = (min_margin <= 0) or (required <= min_margin)
+        # within_limit: True when threshold disabled (<=0) OR leverage meets threshold
+        within_limit = (min_leverage <= 0) or (leverage >= min_leverage)
         results[s] = {
             "leverage":      leverage,
             "mis_available": leverage > 1,
             "required":      required,
             "within_limit":  within_limit,
-            "min_margin":    min_margin,
+            "min_leverage":  min_leverage,
         }
     return results
 

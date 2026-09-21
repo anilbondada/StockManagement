@@ -928,16 +928,16 @@ def sip_control_ui():
   const _marginCache = {};
   function _marginBadge(info) {
     if (!info) return '<span style="color:#4b5563">—</span>';
-    const req   = info.required ? `₹${info.required.toLocaleString('en-IN')}` : '';
-    const title = `Required: ${req}  |  Leverage: ${info.leverage}x  |  Limit: ₹${(info.min_margin||0).toLocaleString('en-IN')}`;
+    const lev   = info.leverage || 1;
+    const min   = info.min_leverage || 2.5;
+    const title = `Leverage: ${lev}x  |  Min required: ${min}x`;
     if (info.within_limit && info.mis_available) {
-      return `<span class="stg-badge stg-green" title="${title}">✓ ${info.leverage}x</span>`;
+      return `<span class="stg-badge stg-green" title="${title}">✓ ${lev}x</span>`;
     }
-    if (!info.mis_available) {
-      return `<span class="stg-badge stg-red" title="${title}">✗ No MIS</span>`;
+    if (!info.mis_available || lev < min) {
+      return `<span class="stg-badge stg-red" title="${title}">✗ ${lev}x</span>`;
     }
-    // mis_available but exceeds limit
-    return `<span class="stg-badge stg-red" title="${title}">✗ ${req}</span>`;
+    return `<span class="stg-badge stg-red" title="${title}">✗ ${lev}x</span>`;
   }
   async function loadMargins(container) {
     const cells = container ? container.querySelectorAll('[data-margin-sym]') : [];

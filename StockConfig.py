@@ -27,7 +27,7 @@ DEFAULTS = {
     "max_gapup_gain_pct":     "10",    # skip if (day_open - prev_close) / prev_close * 100 >= this
     "eb_deadline_time":       "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
     "eb_webhook_cutoff_time": "09:40",  # ignore EB webhooks at or after this IST time (HH:MM)
-    "min_margin":             "0",      # skip order if required margin > this (0 = disabled)
+    "min_margin":             "2.5",    # skip order if broker leverage < this (0 = disabled)
 }
 
 # ── StockInPlay defaults ──────────────────────────────────────────────────────
@@ -45,7 +45,7 @@ SIP_DEFAULTS = {
     "max_fib_gain_pct":     "10",   # skip if (fib_level - prev_close) / prev_close * 100 >= this
     "deadline_time":         "15:00", # cancel unfilled orders after this IST time (HH:MM)
     "webhook_cutoff_hour":   "10",   # ignore new SIP webhooks at or after this hour (IST, 24h)
-    "min_margin":            "0",    # skip order if required margin > this (0 = disabled)
+    "min_margin":            "2.5",  # skip order if broker leverage < this (0 = disabled)
 }
 
 
@@ -128,9 +128,9 @@ def qty_for_ltp_sip(ltp: float, cfg: dict = None) -> int:
 
 
 def check_margin(kite, symbol: str, ltp: float, qty: int, cfg: dict) -> tuple[bool, float, str]:
-    """Returns (ok, required_margin, reason). ok=True means margin check passed."""
-    min_margin = float(cfg.get("min_margin", 0))
-    if min_margin <= 0:
+    """Returns (ok, leverage, reason). ok=True means leverage >= min_margin threshold."""
+    min_leverage = float(cfg.get("min_margin", 2.5))
+    if min_leverage <= 0:
         return True, 0.0, ""
     try:
         result = kite.order_margins([{
@@ -144,11 +144,11 @@ def check_margin(kite, symbol: str, ltp: float, qty: int, cfg: dict) -> tuple[bo
             "price":            ltp,
             "trigger_price":    0,
         }])
-        required = result[0].get("total", 0) if result else 0
-        if required > min_margin:
-            return False, required, f"margin required ₹{required:.0f} > configured ₹{min_margin:.0f}"
-        return True, required, ""
-    except Exception as e:
+        leverage = result[0].get("leverage", 1) if result else 1
+        if leverage < min_leverage:
+            return False, leverage, f"MIS leverage {leverage}x < required {min_leverage}x"
+        return True, leverage, ""
+    except Exception:
         return True, 0.0, ""   # on API error, don't block the order
 
 
@@ -349,12 +349,12 @@ def stock_config_ui():
         </div>
         <div class="hint">Stop monitoring liquidity and skip stock after this time (HH:MM, 24h IST)</div>
       <div class="section-title" style="margin-top:18px">Margin Filter</div>
-        <label>Max Margin per Trade (₹)</label>
+        <label>Minimum MIS Leverage</label>
         <div class="input-row">
-          <input type="number" id="eb_min_margin" step="100" min="0" placeholder="0"/>
-          <span>₹</span>
+          <input type="number" id="eb_min_margin" step="0.5" min="0" placeholder="2.5"/>
+          <span>x</span>
         </div>
-        <div class="hint">Skip order if required margin exceeds this amount. Set 0 to disable.</div>
+        <div class="hint">Skip order if broker MIS leverage is below this threshold (e.g. 2.5 = need at least 2.5x). Set 0 to disable.</div>
     </div>
     <button class="btn-save" id="eb_saveBtn" onclick="save('eb')">Save EarlyBloom Configuration</button>
     <div class="toast" id="eb_toast"></div>
@@ -464,12 +464,12 @@ def stock_config_ui():
     <div class="card">
       <div class="section-title">Margin Filter</div>
       <div class="field">
-        <label>Max Margin per Trade (₹)</label>
+        <label>Minimum MIS Leverage</label>
         <div class="input-row">
-          <input type="number" id="sip_min_margin" step="100" min="0" placeholder="0"/>
-          <span>₹</span>
+          <input type="number" id="sip_min_margin" step="0.5" min="0" placeholder="2.5"/>
+          <span>x</span>
         </div>
-        <div class="hint">Skip order if required margin exceeds this amount. Set 0 to disable.</div>
+        <div class="hint">Skip order if broker MIS leverage is below this threshold (e.g. 2.5 = need at least 2.5x). Set 0 to disable.</div>
       </div>
     </div>
     <button class="btn-save" id="sip_saveBtn" onclick="save('sip')">Save StockInPlay Configuration</button>
