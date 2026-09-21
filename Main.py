@@ -3709,6 +3709,98 @@ def get_stages_api(request: StageRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SWING ANALYSIS — AI INSIGHT
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AIInsightRequest(BaseModel):
+    analysis: dict   # the full result dict for one symbol
+
+
+@app.post("/api/swing-analysis/ai-insight")
+def swing_ai_insight(request: AIInsightRequest):
+    import os
+    import anthropic as _anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503,
+                            detail="ANTHROPIC_API_KEY is not configured on the server.")
+
+    r = request.analysis
+    sym   = r.get("Symbol", "—")
+    date  = r.get("ShortlistDate", "—")
+    stage = r.get("WeinsteinStage", "—")
+    phase = r.get("WyckoffPhase", "—")
+    gap   = r.get("GapUp", "—")
+    o     = r.get("ShortlistDayOpen")
+    h     = r.get("ShortlistDayHigh")
+    l     = r.get("ShortlistDayLow")
+    pc    = r.get("PrevDayClose")
+    ma    = r.get("MA30W")
+    pvma  = r.get("PriceVsMA30WPct")
+    slope = r.get("MA30WSlopePct")
+    h52   = r.get("High52W")
+    l52   = r.get("Low52W")
+    ofib  = r.get("OpenFibPct")
+    onfl  = r.get("OpenNearestFibLevel")
+    entry = r.get("EntryPrice")
+    etrg  = r.get("EntryTriggered", "—")
+    edate = r.get("EntryTriggerDate", "—")
+    mfbg  = r.get("MAX_FBG")
+    mfbr  = r.get("MAX_FBR")
+    absh  = r.get("AbsoluteHighAfter")
+    abhd  = r.get("AbsoluteHighAfterDate", "—")
+    absl  = r.get("AbsoluteLowAfter")
+    absld = r.get("AbsoluteLowAfterDate", "—")
+    err   = r.get("Error")
+
+    if err:
+        raise HTTPException(status_code=400,
+                            detail=f"No analysis data for {sym}: {err}")
+
+    swing_range = round(h - l, 2) if h and l else "—"
+
+    prompt = f"""You are a concise Indian stock market analyst specialising in swing trading.
+
+Stock: {sym}  |  Shortlist Date: {date}
+
+── DAY'S PRICE ACTION ──
+Open: {o}  High: {h}  Low: {l}  Prev Close: {pc}
+Day Range (swing): {swing_range}  |  Gap Up: {gap}
+
+── MARKET STAGE ──
+Weinstein Stage: {stage}
+Wyckoff Phase:   {phase}
+30-Week MA: {ma}  |  Price vs MA: {pvma}%  |  MA Slope (4w): {slope}%
+
+── 52-WEEK CONTEXT ──
+52W High: {h52}  |  52W Low: {l52}
+Shortlist Open at {ofib}% from 52W High (nearest Fib: {onfl}%)
+
+── WHAT HAPPENED AFTER ──
+Entry Price (High+1): {entry}  |  Entry Triggered: {etrg} on {edate}
+Max Gain (Fib ext %): {mfbg}%  |  Max Retracement: {mfbr}%
+Absolute High After:  {absh} on {abhd}
+Absolute Low After:   {absl} on {absld}
+
+Write a 4–5 sentence analysis for a swing trader covering:
+1. The stock's technical position on the shortlist date (stage, MA context, 52W position)
+2. How the day's candle looked as a setup (gap, range, open position)
+3. What the stock did after (did entry trigger? how far did it run or retrace?)
+4. Overall verdict — strong setup, weak setup, or mixed — and one key takeaway
+
+Be direct and specific. Use INR (₹) for prices. Avoid generic disclaimers."""
+
+    client = _anthropic.Anthropic(api_key=api_key)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return {"insight": msg.content[0].text, "symbol": sym, "date": date}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SWING ANALYSIS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3814,6 +3906,9 @@ tbody tr.detail-row{background:#f8f9fb}
 tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#374151}
 .expand-btn{background:none;border:1.5px solid #e5e7eb;border-radius:6px;cursor:pointer;padding:2px 8px;font-size:.75rem;color:#6b7280;transition:.1s}
 .expand-btn:hover{border-color:#4f46e5;color:#4f46e5}
+.ai-btn{background:none;border:none;cursor:pointer;font-size:.85rem;padding:0 3px;opacity:.6;transition:.15s;vertical-align:middle}
+.ai-btn:hover{opacity:1;transform:scale(1.2)}
+.ai-spinner{color:#9ca3af;font-style:italic}
 
 /* badges */
 .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.75rem;font-weight:700}
@@ -4195,7 +4290,7 @@ function renderTableBody(data) {
 
       rows += `<tr data-idx="${i}">
         <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
-        <td><strong>${r.Symbol}</strong></td>
+        <td><strong>${r.Symbol}</strong> <button class="ai-btn" onclick="showAI(${i})" title="AI Analysis">&#x2728;</button></td>
         <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
         <td>${yesNo(r.GapUp)}</td>
         <td>${fmt(r.ShortlistDayHigh,2)}</td>
@@ -4329,6 +4424,38 @@ function goLogin() {
     }
   } catch(e) {}
 })();
+
+// ── AI Insight ─────────────────────────────────────────────────────────────
+async function showAI(idx) {
+  const r = allResults[idx];
+  if (!r) return;
+  const modal = document.getElementById('aiModal');
+  const title = document.getElementById('aiModalTitle');
+  const body  = document.getElementById('aiModalBody');
+  title.textContent = r.Symbol + (r.ShortlistDate ? '  ·  ' + r.ShortlistDate : '');
+  body.innerHTML = '<div class="ai-spinner">Analyzing…</div>';
+  modal.classList.add('open');
+  try {
+    const res = await fetch('/api/swing-analysis/ai-insight', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({analysis: r})
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({detail: 'Request failed'}));
+      body.innerHTML = '<span style="color:#f87171">' + (err.detail || 'Error') + '</span>';
+      return;
+    }
+    const data = await res.json();
+    body.textContent = data.insight || 'No insight returned.';
+  } catch(e) {
+    body.innerHTML = '<span style="color:#f87171">Network error: ' + e.message + '</span>';
+  }
+}
+
+function hideAIModal() {
+  document.getElementById('aiModal').classList.remove('open');
+}
 </script>
 
 <!-- Login modal -->
@@ -4343,6 +4470,17 @@ function goLogin() {
     <div class="modal-btns">
       <button class="btn btn-primary" onclick="goLogin()">Login with Kite</button>
       <button class="btn btn-outline" onclick="hideLoginModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI Insight modal -->
+<div class="modal-overlay" id="aiModal" onclick="if(event.target===this)hideAIModal()">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-title" id="aiModalTitle" style="font-size:1rem;text-align:left;margin-bottom:.5rem"></div>
+    <div id="aiModalBody" style="font-size:.9rem;line-height:1.6;min-height:80px;white-space:pre-wrap;text-align:left"></div>
+    <div class="modal-btns" style="margin-top:1rem">
+      <button class="btn btn-outline" onclick="hideAIModal()">Close</button>
     </div>
   </div>
 </div>

@@ -6,3 +6,4 @@ requests
 openpyxl
 python-multipart
 boto3
+anthropic
