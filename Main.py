@@ -3695,6 +3695,45 @@ class StageRequest(BaseModel):
     symbols: List[str]
 
 
+@app.get("/margins/equity/{tradingsymbol}")
+def margin_check(tradingsymbol: str):
+    kite = get_kite()
+    sym = tradingsymbol.strip().upper()
+
+    # current price
+    quote = kite.quote(f"NSE:{sym}")
+    ltp = quote[f"NSE:{sym}"]["last_price"]
+
+    # qty from config (EB uses qty_for_ltp, SIP uses qty_for_ltp_sip — use EB as default)
+    qty = qty_for_ltp(ltp)
+
+    # margin required for this order
+    order_margins = kite.order_margins([{
+        "exchange":         "NSE",
+        "tradingsymbol":    sym,
+        "transaction_type": "BUY",
+        "variety":          "regular",
+        "product":          "MIS",
+        "order_type":       "LIMIT",
+        "quantity":         qty,
+        "price":            ltp,
+    }])
+    required = order_margins[0]["total"] if order_margins else 0
+
+    # available equity balance
+    equity = kite.margins("equity")
+    available = equity["available"]["live_balance"]
+
+    return {
+        "symbol":    sym,
+        "ltp":       ltp,
+        "quantity":  qty,
+        "required":  round(required, 2),
+        "available": round(available, 2),
+        "sufficient": available >= required,
+    }
+
+
 @app.post("/api/stage")
 def get_stages_api(request: StageRequest):
     import datetime as _dt
