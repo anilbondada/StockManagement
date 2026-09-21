@@ -3719,28 +3719,43 @@ function updateRunBtn() {
 }
 
 // ── CSV loader ─────────────────────────────────────────────────────────────
+function parseCSVRow(line) {
+  // handles quoted fields including commas and escaped quotes inside values
+  const cols = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuote && line[i + 1] === '"') { cur += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (ch === ',' && !inQuote) {
+      cols.push(cur.trim()); cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
 function loadCSV(e) {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = ev => {
-    const lines = ev.target.result.split(/\\r?\\n/);
-    const headers = (lines[0] || '').split(',');
-    const colIdx = headers.findIndex(c => c.trim().toLowerCase() === 'symbol');
+    const lines = ev.target.result.split(/\\r?\\n/).filter(l => l.trim());
+    if (!lines.length) return;
+    const headers = parseCSVRow(lines[0]);
+    const colIdx = headers.findIndex(c => c.toLowerCase() === 'symbol');
     if (colIdx < 0) {
       alert('No "Symbol" column found in the CSV. Please ensure the header row contains a column named "Symbol".');
       document.getElementById('csvInput').value = '';
       return;
     }
-    let added = 0;
     lines.slice(1).forEach(line => {
-      if (!line.trim()) return;
-      const cols = line.split(',');
-      const sym = (cols[colIdx] || '').trim().toUpperCase();
-      if (sym && !symbols.includes(sym)) {
-        symbols.push(sym);
-        added++;
-      }
+      const cols = parseCSVRow(line);
+      const sym = (cols[colIdx] || '').toUpperCase();
+      if (sym && !symbols.includes(sym)) symbols.push(sym);
     });
     renderTags();
     updateRunBtn();
