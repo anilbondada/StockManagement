@@ -758,6 +758,7 @@ app.include_router(sip_router)
 _token_cache: dict = {}        # NSE:SYMBOL -> instrument_token
 _instruments_cache: dict = {}  # exchange   -> full instruments list
 _access_token: Optional[str] = None
+_login_next: Optional[str] = None  # redirect target after /callback
 
 
 # ── Token persistence ─────────────────────────────────────────────────────────
@@ -791,15 +792,18 @@ def validate_token(token: str) -> bool:
 # ── Auth routes ───────────────────────────────────────────────────────────────
 
 @app.get("/login")
-def login():
+def login(next: Optional[str] = None):
     """Redirect to Kite login. Set your app's redirect URL to /callback."""
+    global _login_next
+    if next:
+        _login_next = next
     return RedirectResponse(url=get_login_url())
 
 
 @app.get("/callback")
 async def callback(request_token: str):
     """Zerodha redirects here with request_token after login."""
-    global _access_token, _paused
+    global _access_token, _paused, _login_next
     try:
         _access_token = fetch_access_token(request_token)
         save_token(_access_token)
@@ -810,6 +814,9 @@ async def callback(request_token: str):
         _sip_mod.sip_resume()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
+    redirect_url, _login_next = _login_next, None
+    if redirect_url:
+        return RedirectResponse(url=redirect_url)
     return {"message": "Login successful", "access_token": _access_token}
 
 
@@ -3605,6 +3612,15 @@ tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#37415
 
 .empty{text-align:center;padding:60px;color:#9ca3af}
 .error-row td{color:#dc2626;background:#fff5f5}
+
+/* ── login modal ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:16px;padding:32px 28px;max-width:400px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.18)}
+.modal-icon{font-size:2.4rem;margin-bottom:12px}
+.modal-title{font-size:1.1rem;font-weight:700;color:#1a1a2e;margin-bottom:8px}
+.modal-desc{font-size:.88rem;color:#6b7280;line-height:1.5;margin-bottom:22px}
+.modal-btns{display:flex;flex-direction:column;gap:10px}
 </style>
 </head>
 <body>
@@ -3750,6 +3766,10 @@ async function runAnalysis() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ symbols, date: dateVal })
     });
+    if (res.status === 401) {
+      showLoginModal();
+      return;
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({detail: res.statusText}));
       throw new Error(err.detail || res.statusText);
@@ -4016,6 +4036,60 @@ function exportCSV() {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+
+// ── Login modal ────────────────────────────────────────────────────────────
+function showLoginModal() {
+  document.getElementById('loginModal').classList.add('open');
+}
+
+function hideLoginModal() {
+  document.getElementById('loginModal').classList.remove('open');
+}
+
+function goLogin() {
+  // save current state so it survives the redirect
+  try {
+    localStorage.setItem('sa_symbols', JSON.stringify(symbols));
+    localStorage.setItem('sa_date', document.getElementById('dateInput').value || '');
+  } catch(e) {}
+  window.location.href = '/login?next=/swing-analysis';
+}
+
+// ── Restore state saved before login redirect ──────────────────────────────
+(function restoreState() {
+  try {
+    const saved = localStorage.getItem('sa_symbols');
+    const savedDate = localStorage.getItem('sa_date');
+    if (saved) {
+      const syms = JSON.parse(saved);
+      syms.forEach(s => { if (s && !symbols.includes(s)) symbols.push(s); });
+      renderTags();
+      updateRunBtn();
+      localStorage.removeItem('sa_symbols');
+    }
+    if (savedDate) {
+      document.getElementById('dateInput').value = savedDate;
+      localStorage.removeItem('sa_date');
+    }
+  } catch(e) {}
+})();
 </script>
+
+<!-- Login modal -->
+<div class="modal-overlay" id="loginModal">
+  <div class="modal">
+    <div class="modal-icon">🔐</div>
+    <div class="modal-title">Kite Login Required</div>
+    <div class="modal-desc">
+      Your Zerodha Kite session has expired or is not active.<br>
+      Click below to log in — you'll be brought back here automatically with your symbols intact.
+    </div>
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="goLogin()">Login with Kite</button>
+      <button class="btn btn-outline" onclick="hideLoginModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>"""
