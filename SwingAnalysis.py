@@ -464,6 +464,53 @@ def analyze_stock(kite, symbol, shortlist_date, today=None, exchange="NSE", conf
 
 
 # ------------------------------------------------------------------ #
+# STAGE-ONLY LOOKUP  (lighter than analyze_stock — no lookahead data)
+# ------------------------------------------------------------------ #
+def get_stage(kite, symbol, as_of_date=None, exchange="NSE", config=None):
+    """Return Weinstein stage / Wyckoff phase for a symbol as of as_of_date.
+
+    Fetches ~300 days of daily history (enough for 30-week MA + slope).
+    Much lighter than analyze_stock() — use this when you only need stage.
+
+    Returns a dict with keys: symbol, WeinsteinStage, WyckoffPhase,
+    MA30W, PriceVsMA30WPct, MA30WSlopePct.
+    """
+    import datetime as _dt
+    if as_of_date is None:
+        as_of_date = _dt.date.today()
+    if hasattr(as_of_date, "date"):
+        as_of_date = as_of_date.date()
+    elif isinstance(as_of_date, str):
+        as_of_date = _dt.date.fromisoformat(as_of_date)
+
+    if exchange not in _instrument_cache:
+        _instrument_cache[exchange] = build_instrument_map(kite, exchange)
+
+    token = _instrument_cache[exchange].get(symbol)
+    if token is None:
+        return {"symbol": symbol, "WeinsteinStage": "Symbol not found",
+                "WyckoffPhase": "—", "MA30W": None,
+                "PriceVsMA30WPct": None, "MA30WSlopePct": None}
+
+    from_date = as_of_date - _dt.timedelta(days=300)
+    try:
+        hist = _fetch_daily_history(kite, token, from_date, as_of_date,
+                                    symbol=symbol, config=config)
+        if hist.empty:
+            return {"symbol": symbol, "WeinsteinStage": "No data",
+                    "WyckoffPhase": "—", "MA30W": None,
+                    "PriceVsMA30WPct": None, "MA30WSlopePct": None}
+        hist["date"] = pd.to_datetime(hist["date"]).dt.date
+        hist = hist.sort_values("date").reset_index(drop=True)
+        stage = compute_market_stage(hist, as_of_date, config=config)
+        return {"symbol": symbol, **stage}
+    except Exception as e:
+        return {"symbol": symbol, "WeinsteinStage": "Error",
+                "WyckoffPhase": str(e), "MA30W": None,
+                "PriceVsMA30WPct": None, "MA30WSlopePct": None}
+
+
+# ------------------------------------------------------------------ #
 # BATCH RUNNER
 # ------------------------------------------------------------------ #
 def run_batch(kite, rows, instrument_map, config=None, exchange="NSE"):

@@ -1370,6 +1370,7 @@ def _render_eb_stocks_table(stocks: list) -> str:
         rows.append(
             f'<tr>'
             f'<td><strong>{esc(st["symbol"])}</strong></td>'
+            f'<td><span class="stage-cell" data-stage-sym="{esc(st["symbol"])}">—</span></td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{alert_ts}</td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{pct_str}</td>'
             f'<td><span class="badge s-{esc(status)}">{esc(status)}</span></td>'
@@ -1379,7 +1380,7 @@ def _render_eb_stocks_table(stocks: list) -> str:
         )
     return (
         '<table><thead><tr>'
-        '<th>Symbol</th><th>Alert</th><th>% Chg</th><th>Status</th><th>Reason / Order</th><th>Action</th>'
+        '<th>Symbol</th><th>Stage</th><th>Alert</th><th>% Chg</th><th>Status</th><th>Reason / Order</th><th>Action</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
     )
 
@@ -3683,6 +3684,27 @@ def morning_stars_analysis(request: MorningStarsRequest):
         except Exception as e:
             results.append(MorningStarsResponse(**base, error=str(e)))
 
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE LOOKUP  (used by EB + SIP tables)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StageRequest(BaseModel):
+    symbols: List[str]
+
+
+@app.post("/api/stage")
+def get_stages_api(request: StageRequest):
+    import datetime as _dt
+    import SwingAnalysis as sa
+
+    kite = get_kite()
+    today = _dt.date.today()
+    results = {}
+    for symbol in [s.strip().upper() for s in request.symbols if s.strip()]:
+        results[symbol] = sa.get_stage(kite, symbol, today)
     return results
 
 

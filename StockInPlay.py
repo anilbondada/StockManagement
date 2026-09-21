@@ -736,6 +736,7 @@ def _render_stocks_table(stocks: list) -> str:
         rows.append(
             f'<tr>'
             f'<td><strong>{esc(st["symbol"])}</strong></td>'
+            f'<td><span class="stage-cell" data-stage-sym="{esc(st["symbol"])}">—</span></td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{alert_time}</td>'
             f'<td><span class="badge s-{status_key}">{status_label}</span></td>'
             f'<td style="max-width:220px">{detail_cell}</td>'
@@ -744,7 +745,7 @@ def _render_stocks_table(stocks: list) -> str:
         )
     return (
         '<table><thead><tr>'
-        '<th>Symbol</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th>'
+        '<th>Symbol</th><th>Stage</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
     )
 
@@ -798,6 +799,13 @@ def sip_control_ui():
     tbody tr:last-child td{border-bottom:none}
 
     .badge{padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block;margin:1px}
+    .stg-badge{padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block;white-space:nowrap}
+    .stg-green{background:#14532d;color:#86efac}
+    .stg-red{background:#450a0a;color:#fca5a5}
+    .stg-orange{background:#431407;color:#fb923c}
+    .stg-yellow{background:#44350a;color:#fde68a}
+    .stg-blue{background:#1e3a5f;color:#93c5fd}
+    .stg-gray{background:#1f2937;color:#6b7280}
     .s-waiting{background:#1e3a5f;color:#93c5fd}
     .s-limit_placed{background:#14532d;color:#86efac}
     .s-filled{background:#14532d;color:#86efac}
@@ -890,6 +898,48 @@ def sip_control_ui():
   }
 
   /* ── StockInPlay ── */
+  /* ── Stage badge helpers ── */
+  const _stageCache = {};
+  function _stageBadge(stage) {
+    if (!stage) return '—';
+    let cls = 'stg-gray';
+    if (/Stage 2|Advancing/i.test(stage))  cls = 'stg-green';
+    else if (/Stage 4|Declining/i.test(stage))  cls = 'stg-red';
+    else if (/Stage 3|Topping|Distribution/i.test(stage)) cls = 'stg-orange';
+    else if (/Transition/i.test(stage))    cls = 'stg-yellow';
+    else if (/Stage 1|Basing|Accumulation/i.test(stage)) cls = 'stg-blue';
+    else if (/Insufficient|Not found|No data|Error/i.test(stage)) cls = 'stg-gray';
+    const short = stage
+      .replace(/Stage (\\d).*?\\(([^)]+)\\).*/, 'S$1 $2')
+      .replace(/Stage.*?Transition.*/, 'Transition')
+      .replace(/Insufficient data/, 'N/A');
+    return `<span class="stg-badge ${cls}" title="${stage}">${short}</span>`;
+  }
+  async function loadStages(container) {
+    const cells = container ? container.querySelectorAll('[data-stage-sym]') : [];
+    const needed = [...new Set([...cells].map(c => c.dataset.stageSym))]
+                   .filter(s => !_stageCache[s]);
+    if (needed.length) {
+      try {
+        const res = await fetch('/api/stage', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({symbols: needed})
+        });
+        if (res.ok) {
+          const data = await res.json();
+          Object.entries(data).forEach(([sym, info]) => {
+            _stageCache[sym] = info.WeinsteinStage || '—';
+          });
+        }
+      } catch(e) {}
+    }
+    cells.forEach(c => {
+      const stage = _stageCache[c.dataset.stageSym];
+      if (stage) c.outerHTML = _stageBadge(stage);
+    });
+  }
+
   async function refreshSIP() {
     try {
       const [s, html] = await Promise.all([
@@ -903,7 +953,9 @@ def sip_control_ui():
       document.getElementById('sip-cancelled-count').textContent= (s.disabled_stocks||[]).length;
       document.getElementById('sip-pauseBtn').style.display     = paused ? 'none' : '';
       document.getElementById('sip-resumeBtn').style.display    = paused ? '' : 'none';
-      document.getElementById('sip-stocks-wrap').innerHTML      = html;
+      const wrap = document.getElementById('sip-stocks-wrap');
+      wrap.innerHTML = html;
+      loadStages(wrap);
     } catch(e) {
       document.getElementById('sip-stocks-wrap').innerHTML =
         '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
@@ -942,7 +994,9 @@ def sip_control_ui():
       document.getElementById('eb-status').textContent      = paused ? 'PAUSED' : 'Running';
       document.getElementById('eb-pauseBtn').style.display  = paused ? 'none' : '';
       document.getElementById('eb-resumeBtn').style.display = paused ? '' : 'none';
-      document.getElementById('eb-orders-wrap').innerHTML   = html;
+      const ebWrap = document.getElementById('eb-orders-wrap');
+      ebWrap.innerHTML = html;
+      loadStages(ebWrap);
     } catch(e) {
       document.getElementById('eb-orders-wrap').innerHTML =
         '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
