@@ -4290,7 +4290,7 @@ function renderTableBody(data) {
 
       rows += `<tr data-idx="${i}">
         <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
-        <td><strong>${r.Symbol}</strong> <button class="ai-btn" onclick="showAI(${i})" title="AI Analysis">&#x2728;</button></td>
+        <td><strong>${r.Symbol}</strong></td>
         <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
         <td>${yesNo(r.GapUp)}</td>
         <td>${fmt(r.ShortlistDayHigh,2)}</td>
