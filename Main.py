@@ -27,7 +27,7 @@ from ExcelUpload import router as excel_router
 from ControlPanel import router as control_router
 from StockInPlay import router as sip_router, init_sip_table
 from StockConfig import (router as config_router, get_config, qty_for_ltp, init_config_table,
-                         init_stockinplay_config_table)
+                         init_stockinplay_config_table, check_margin)
 from LiveStockManager import (
     router as live_router,
     on_ticks as _live_on_ticks,
@@ -2343,11 +2343,20 @@ def _eb_monitor_stock(alert_id: int, symbol: str, candle_high: float):
                     _append_skip_reason(conn, alert_id, symbol, reason)
                 continue
 
-            # Liquidity met — place order
+            # Liquidity met — check margin config before placing order
             trigger_price = round(candle_high + 1, 2)
             limit_price   = round(candle_high + 1, 2)
 
             quantity = qty_for_ltp(ltp, cfg)
+
+            margin_ok, margin_req, margin_reason = check_margin(kite, symbol, ltp, quantity, cfg)
+            if not margin_ok:
+                print(f"[eb-monitor] {symbol}: skip (permanent) — {margin_reason}")
+                with _db() as conn:
+                    conn.execute("UPDATE stocks_fetched_info SET order_status='skipped' WHERE alert_id=? AND symbol=?", (alert_id, symbol))
+                    _append_skip_reason(conn, alert_id, symbol, margin_reason)
+                _eb_monitoring_stocks.pop(symbol, None)
+                return
 
             # SL BUY requires LTP < trigger_price; if already above, fall back to LIMIT BUY at trigger_price
             if ltp >= trigger_price:
@@ -3771,14 +3780,22 @@ def get_margins_api(request: MarginRequest):
             "trigger_price":    0,
         })
 
+    cfg        = get_config()
+    min_margin = float(cfg.get("min_margin", 0))
+
     margins = kite.order_margins(orders)
     for i, s in enumerate(syms):
         m        = margins[i] if i < len(margins) else {}
         leverage = m.get("leverage", 1)
+        required = round(m.get("total", 0), 2)
+        # within_limit: True when min_margin=0 (disabled) OR required <= min_margin
+        within_limit = (min_margin <= 0) or (required <= min_margin)
         results[s] = {
             "leverage":      leverage,
             "mis_available": leverage > 1,
-            "required":      round(m.get("total", 0), 2),
+            "required":      required,
+            "within_limit":  within_limit,
+            "min_margin":    min_margin,
         }
     return results
 

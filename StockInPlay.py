@@ -177,7 +177,7 @@ def _fetch_candle(kite, token: int, candle_close_time: datetime) -> Optional[dic
 
 def _run_sip_flow(flow: SIPFlow):
     import Main as _main
-    from StockConfig import get_stockinplay_config, qty_for_ltp_sip
+    from StockConfig import get_stockinplay_config, qty_for_ltp_sip, check_margin
 
     symbol = flow.symbol
 
@@ -327,6 +327,15 @@ def _run_sip_flow(flow: SIPFlow):
                 continue
 
             qty = qty_for_ltp_sip(ltp, cfg)
+
+            # Margin check — skip permanently if required > configured min_margin
+            margin_ok, margin_req, margin_reason = check_margin(kite, symbol, ltp, qty, cfg)
+            if not margin_ok:
+                print(f"[sip] {symbol}: skip (permanent) — {margin_reason}")
+                flow.status = "skipped"
+                _save_flow(flow, note=margin_reason)
+                _sip_flows.pop(symbol, None)
+                return
 
             # ── Step 5: LIMIT BUY at Fib 61.8 ────────────────────────────
             limit_order_id = kite.place_order(
@@ -919,10 +928,16 @@ def sip_control_ui():
   const _marginCache = {};
   function _marginBadge(info) {
     if (!info) return '<span style="color:#4b5563">—</span>';
-    if (info.mis_available) {
-      return `<span class="stg-badge stg-green" title="MIS leverage: ${info.leverage}x">✓ ${info.leverage}x</span>`;
+    const req   = info.required ? `₹${info.required.toLocaleString('en-IN')}` : '';
+    const title = `Required: ${req}  |  Leverage: ${info.leverage}x  |  Limit: ₹${(info.min_margin||0).toLocaleString('en-IN')}`;
+    if (info.within_limit && info.mis_available) {
+      return `<span class="stg-badge stg-green" title="${title}">✓ ${info.leverage}x</span>`;
     }
-    return `<span class="stg-badge stg-red" title="No MIS leverage">✗ No MIS</span>`;
+    if (!info.mis_available) {
+      return `<span class="stg-badge stg-red" title="${title}">✗ No MIS</span>`;
+    }
+    // mis_available but exceeds limit
+    return `<span class="stg-badge stg-red" title="${title}">✗ ${req}</span>`;
   }
   async function loadMargins(container) {
     const cells = container ? container.querySelectorAll('[data-margin-sym]') : [];

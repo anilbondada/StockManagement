@@ -27,6 +27,7 @@ DEFAULTS = {
     "max_gapup_gain_pct":     "10",    # skip if (day_open - prev_close) / prev_close * 100 >= this
     "eb_deadline_time":       "15:00",  # stop monitoring liquidity after this IST time (HH:MM)
     "eb_webhook_cutoff_time": "09:40",  # ignore EB webhooks at or after this IST time (HH:MM)
+    "min_margin":             "0",      # skip order if required margin > this (0 = disabled)
 }
 
 # ── StockInPlay defaults ──────────────────────────────────────────────────────
@@ -44,6 +45,7 @@ SIP_DEFAULTS = {
     "max_fib_gain_pct":     "10",   # skip if (fib_level - prev_close) / prev_close * 100 >= this
     "deadline_time":         "15:00", # cancel unfilled orders after this IST time (HH:MM)
     "webhook_cutoff_hour":   "10",   # ignore new SIP webhooks at or after this hour (IST, 24h)
+    "min_margin":            "0",    # skip order if required margin > this (0 = disabled)
 }
 
 
@@ -123,6 +125,31 @@ def qty_for_ltp_sip(ltp: float, cfg: dict = None) -> int:
         return int(cfg.get("qty_800_1000", 50))
     else:
         return int(cfg.get("qty_1000_plus", 25))
+
+
+def check_margin(kite, symbol: str, ltp: float, qty: int, cfg: dict) -> tuple[bool, float, str]:
+    """Returns (ok, required_margin, reason). ok=True means margin check passed."""
+    min_margin = float(cfg.get("min_margin", 0))
+    if min_margin <= 0:
+        return True, 0.0, ""
+    try:
+        result = kite.order_margins([{
+            "exchange":         "NSE",
+            "tradingsymbol":    symbol,
+            "transaction_type": "BUY",
+            "variety":          "regular",
+            "product":          "MIS",
+            "order_type":       "LIMIT",
+            "quantity":         qty,
+            "price":            ltp,
+            "trigger_price":    0,
+        }])
+        required = result[0].get("total", 0) if result else 0
+        if required > min_margin:
+            return False, required, f"margin required ₹{required:.0f} > configured ₹{min_margin:.0f}"
+        return True, required, ""
+    except Exception as e:
+        return True, 0.0, ""   # on API error, don't block the order
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -321,6 +348,13 @@ def stock_config_ui():
           <input type="text" id="eb_eb_deadline_time" placeholder="15:00" style="max-width:90px"/>
         </div>
         <div class="hint">Stop monitoring liquidity and skip stock after this time (HH:MM, 24h IST)</div>
+      <div class="section-title" style="margin-top:18px">Margin Filter</div>
+        <label>Max Margin per Trade (₹)</label>
+        <div class="input-row">
+          <input type="number" id="eb_min_margin" step="100" min="0" placeholder="0"/>
+          <span>₹</span>
+        </div>
+        <div class="hint">Skip order if required margin exceeds this amount. Set 0 to disable.</div>
     </div>
     <button class="btn-save" id="eb_saveBtn" onclick="save('eb')">Save EarlyBloom Configuration</button>
     <div class="toast" id="eb_toast"></div>
@@ -427,15 +461,26 @@ def stock_config_ui():
         </div>
       </div>
     </div>
+    <div class="card">
+      <div class="section-title">Margin Filter</div>
+      <div class="field">
+        <label>Max Margin per Trade (₹)</label>
+        <div class="input-row">
+          <input type="number" id="sip_min_margin" step="100" min="0" placeholder="0"/>
+          <span>₹</span>
+        </div>
+        <div class="hint">Skip order if required margin exceeds this amount. Set 0 to disable.</div>
+      </div>
+    </div>
     <button class="btn-save" id="sip_saveBtn" onclick="save('sip')">Save StockInPlay Configuration</button>
     <div class="toast" id="sip_toast"></div>
   </div>
 
   <script>
     const FIELDS = {
-      eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_upper_circuit_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_time'],
+      eb:  ['skip_pct_change','skip_ltp','max_gapup_gain_pct','min_upper_circuit_pct','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus','eb_deadline_time','eb_webhook_cutoff_time','min_margin'],
       sip: ['skip_pct_change','skip_ltp','min_book_qty','qty_1_500','qty_500_800','qty_800_1000','qty_1000_plus',
-            'min_upper_circuit_pct','max_gapup_gain_pct','max_fib_gain_pct','deadline_time','webhook_cutoff_hour']
+            'min_upper_circuit_pct','max_gapup_gain_pct','max_fib_gain_pct','deadline_time','webhook_cutoff_hour','min_margin']
     };
     const API = { eb: '/api/stock-config', sip: '/api/stockinplay-config' };
 
