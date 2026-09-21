@@ -4146,7 +4146,10 @@ function renderResults(data) {
         <div class="results-title">Results</div>
         <div class="results-meta">${data.length} symbols · ${ok} analysed · ${errs} error${errs!==1?'s':''} · Date: ${date}</div>
       </div>
-      <button class="btn btn-outline btn-sm" onclick="exportCSV()">Export CSV</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" onclick="exportSummary()">Export Summary</button>
+        <button class="btn btn-outline btn-sm" onclick="exportFull()">Export Full Analysis</button>
+      </div>
     </div>
     <div class="tbl-wrap">
       <table id="resultsTable">
@@ -4250,25 +4253,44 @@ function sortBy(col) {
   renderTableBody(sorted);
 }
 
-// ── Export CSV ─────────────────────────────────────────────────────────────
-function exportCSV() {
+// ── Export helpers ─────────────────────────────────────────────────────────
+function _csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return s.includes(',') || s.includes('"') || s.includes('\\n')
+    ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function _downloadCSV(rows, filename) {
+  const blob = new Blob([rows.join('\\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// Export only the 5 visible table columns
+function exportSummary() {
+  if (!allResults.length) return;
+  const cols = ['Symbol', 'WeinsteinStage', 'GapUp', 'ShortlistDayHigh', 'ShortlistDayLow'];
+  const headers = ['Symbol', 'Stage', 'Gap Up', 'Day High', 'Day Low'];
+  const rows = [headers.join(',')];
+  allResults.forEach(r => {
+    rows.push(cols.map(k => _csvCell(r[k])).join(','));
+  });
+  _downloadCSV(rows, 'swing_summary.csv');
+}
+
+// Export every computed column
+function exportFull() {
   if (!allResults.length) return;
   const keys = Object.keys(allResults[0]);
   const rows = [keys.join(',')];
   allResults.forEach(r => {
-    rows.push(keys.map(k => {
-      const v = r[k];
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      return s.includes(',') ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(','));
+    rows.push(keys.map(k => _csvCell(r[k])).join(','));
   });
-  const blob = new Blob([rows.join('\\n')], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'swing_analysis.csv';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  _downloadCSV(rows, 'swing_full_analysis.csv');
 }
 
 // ── Login modal ────────────────────────────────────────────────────────────
