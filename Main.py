@@ -944,9 +944,216 @@ class MorningStarsResponse(BaseModel):
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def read_root():
-    return {"message": "Hello, Anil!", "status": "running"}
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>HH Trading — Home</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;padding:32px 20px}
+.top{margin-bottom:32px}
+.top h1{font-size:1.6rem;font-weight:800;color:#1a1a2e;letter-spacing:-.02em}
+.top p{font-size:.88rem;color:#6b7280;margin-top:4px}
+
+.section-title{font-size:.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.08em;margin:0 0 12px 4px}
+.group{margin-bottom:32px}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+
+.card{background:#fff;border-radius:14px;padding:20px 18px 18px;box-shadow:0 1px 4px rgba(0,0,0,.07);border:1.5px solid #f1f3f5;cursor:pointer;text-decoration:none;display:block;transition:box-shadow .15s,border-color .15s,transform .1s}
+.card:hover{box-shadow:0 4px 16px rgba(79,70,229,.13);border-color:#c7d2fe;transform:translateY(-2px)}
+.card:active{transform:translateY(0)}
+
+.icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:14px}
+.icon svg{width:22px;height:22px}
+
+.card-name{font-size:.95rem;font-weight:700;color:#1a1a2e;margin-bottom:4px}
+.card-desc{font-size:.78rem;color:#9ca3af;line-height:1.4}
+
+/* colour themes per group */
+.icon-purple{background:#ede9fe} .icon-purple svg{color:#7c3aed}
+.icon-green {background:#dcfce7} .icon-green  svg{color:#16a34a}
+.icon-blue  {background:#dbeafe} .icon-blue   svg{color:#2563eb}
+.icon-orange{background:#ffedd5} .icon-orange svg{color:#ea580c}
+.icon-rose  {background:#ffe4e6} .icon-rose   svg{color:#e11d48}
+.icon-teal  {background:#ccfbf1} .icon-teal   svg{color:#0d9488}
+.icon-yellow{background:#fef9c3} .icon-yellow svg{color:#ca8a04}
+.icon-indigo{background:#e0e7ff} .icon-indigo svg{color:#4338ca}
+.icon-pink  {background:#fce7f3} .icon-pink   svg{color:#db2777}
+.icon-slate {background:#f1f5f9} .icon-slate  svg{color:#475569}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <h1>HH Trading</h1>
+  <p>Select a tool to get started</p>
+</div>
+
+<!-- LIVE TRADING -->
+<div class="group">
+  <div class="section-title">Live Trading</div>
+  <div class="grid">
+
+    <a class="card" href="/control">
+      <div class="icon icon-purple">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M19.07 4.93l-3.18 3.18M4.93 19.07l3.18-3.18"/>
+          <path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>
+        </svg>
+      </div>
+      <div class="card-name">Control Panel</div>
+      <div class="card-desc">Start/stop strategies, manage system state</div>
+    </a>
+
+    <a class="card" href="/earlybloom">
+      <div class="icon icon-green">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M12 22V12M12 12C12 7 7 4 2 4c0 5 3 8 10 8M12 12c0-5 5-8 10-8-1 5-4 8-10 8"/>
+        </svg>
+      </div>
+      <div class="card-name">Early Bloom</div>
+      <div class="card-desc">EB strategy alerts and order monitoring</div>
+    </a>
+
+    <a class="card" href="/sip-control">
+      <div class="icon icon-blue">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>
+        </svg>
+      </div>
+      <div class="card-name">StockInPlay</div>
+      <div class="card-desc">SIP strategy flows and execution control</div>
+    </a>
+
+    <a class="card" href="/order-updates">
+      <div class="icon icon-orange">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+        </svg>
+      </div>
+      <div class="card-name">Order Updates</div>
+      <div class="card-desc">Live order status and execution feed</div>
+    </a>
+
+    <a class="card" href="/orders">
+      <div class="icon icon-teal">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/>
+        </svg>
+      </div>
+      <div class="card-name">Orders</div>
+      <div class="card-desc">Full order book and history</div>
+    </a>
+
+    <a class="card" href="/place-order">
+      <div class="icon icon-rose">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+        </svg>
+      </div>
+      <div class="card-name">Place Order</div>
+      <div class="card-desc">Manually place buy / sell orders</div>
+    </a>
+
+  </div>
+</div>
+
+<!-- CHARTS & DATA -->
+<div class="group">
+  <div class="section-title">Charts &amp; Data</div>
+  <div class="grid">
+
+    <a class="card" href="/volume-chart">
+      <div class="icon icon-indigo">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <rect x="3" y="12" width="4" height="9"/><rect x="10" y="7" width="4" height="14"/><rect x="17" y="3" width="4" height="18"/>
+        </svg>
+      </div>
+      <div class="card-name">Volume Chart</div>
+      <div class="card-desc">Live buy / sell quote snapshots per candle</div>
+    </a>
+
+    <a class="card" href="/live-candles">
+      <div class="icon icon-yellow">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2"/>
+          <rect x="7" y="7" width="10" height="10" rx="2"/>
+        </svg>
+      </div>
+      <div class="card-name">Live Candles</div>
+      <div class="card-desc">Real-time 5-min candle data</div>
+    </a>
+
+    <a class="card" href="/stocks-info">
+      <div class="icon icon-teal">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+        </svg>
+      </div>
+      <div class="card-name">Stocks Info</div>
+      <div class="card-desc">Fetched stock details and candle info</div>
+    </a>
+
+  </div>
+</div>
+
+<!-- ANALYSIS -->
+<div class="group">
+  <div class="section-title">Analysis</div>
+  <div class="grid">
+
+    <a class="card" href="/swing-analysis">
+      <div class="icon icon-purple">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <polyline points="2 20 7 10 12 14 17 4 22 8"/>
+          <line x1="2" y1="20" x2="22" y2="20"/>
+        </svg>
+      </div>
+      <div class="card-name">Swing Analysis</div>
+      <div class="card-desc">Fibonacci retracement, gain &amp; Weinstein stage</div>
+    </a>
+
+    <a class="card" href="/chartink-alerts">
+      <div class="icon icon-orange">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+        </svg>
+      </div>
+      <div class="card-name">ChartInk Alerts</div>
+      <div class="card-desc">Incoming scanner webhook alerts</div>
+    </a>
+
+    <a class="card" href="/getStockDetails">
+      <div class="icon icon-slate">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </div>
+      <div class="card-name">Stock Details</div>
+      <div class="card-desc">Lookup OHLCV and instrument data</div>
+    </a>
+
+    <a class="card" href="/simulate">
+      <div class="icon icon-pink">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>
+        </svg>
+      </div>
+      <div class="card-name">Simulate</div>
+      <div class="card-desc">Test webhook payloads and flows</div>
+    </a>
+
+  </div>
+</div>
+
+</body>
+</html>"""
 
 
 
