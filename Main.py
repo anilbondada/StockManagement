@@ -3709,15 +3709,21 @@ function loadCSV(e) {
   const reader = new FileReader();
   reader.onload = ev => {
     const lines = ev.target.result.split(/\\r?\\n/);
-    const firstLine = (lines[0] || '').split(',');
-    // detect header row
-    const colIdx = firstLine.findIndex(c => /symbol/i.test(c.trim()));
-    lines.forEach((line, i) => {
-      if (i === 0 && colIdx >= 0) return; // skip header
+    const headers = (lines[0] || '').split(',');
+    const colIdx = headers.findIndex(c => c.trim().toLowerCase() === 'symbol');
+    if (colIdx < 0) {
+      alert('No "Symbol" column found in the CSV. Please ensure the header row contains a column named "Symbol".');
+      document.getElementById('csvInput').value = '';
+      return;
+    }
+    let added = 0;
+    lines.slice(1).forEach(line => {
+      if (!line.trim()) return;
       const cols = line.split(',');
-      const sym = (colIdx >= 0 ? cols[colIdx] : cols[0] || '').trim().toUpperCase();
-      if (sym && /^[A-Z0-9&-]+$/.test(sym) && !symbols.includes(sym)) {
+      const sym = (cols[colIdx] || '').trim().toUpperCase();
+      if (sym && !symbols.includes(sym)) {
         symbols.push(sym);
+        added++;
       }
     });
     renderTags();
