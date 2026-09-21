@@ -1371,6 +1371,7 @@ def _render_eb_stocks_table(stocks: list) -> str:
             f'<tr>'
             f'<td><strong>{esc(st["symbol"])}</strong></td>'
             f'<td><span class="stage-cell" data-stage-sym="{esc(st["symbol"])}">—</span></td>'
+            f'<td><span class="margin-cell" data-margin-sym="{esc(st["symbol"])}">—</span></td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{alert_ts}</td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{pct_str}</td>'
             f'<td><span class="badge s-{esc(status)}">{esc(status)}</span></td>'
@@ -1380,7 +1381,7 @@ def _render_eb_stocks_table(stocks: list) -> str:
         )
     return (
         '<table><thead><tr>'
-        '<th>Symbol</th><th>Stage</th><th>Alert</th><th>% Chg</th><th>Status</th><th>Reason / Order</th><th>Action</th>'
+        '<th>Symbol</th><th>Stage</th><th>Margin</th><th>Alert</th><th>% Chg</th><th>Status</th><th>Reason / Order</th><th>Action</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
     )
 
@@ -3700,14 +3701,10 @@ def margin_check(tradingsymbol: str):
     kite = get_kite()
     sym = tradingsymbol.strip().upper()
 
-    # current price
     quote = kite.quote(f"NSE:{sym}")
     ltp = quote[f"NSE:{sym}"]["last_price"]
-
-    # qty from config
     qty = qty_for_ltp(ltp)
 
-    # margin required for MIS (intraday) order
     order_margins = kite.order_margins([{
         "exchange":         "NSE",
         "tradingsymbol":    sym,
@@ -3720,33 +3717,70 @@ def margin_check(tradingsymbol: str):
         "trigger_price":    0,
     }])
 
-    m = order_margins[0] if order_margins else {}
-    required  = m.get("total", 0)
-    leverage  = m.get("leverage", 1)
-    span      = m.get("span", 0)
-    exposure  = m.get("exposure", 0)
-    var       = m.get("var", 0)
-    charges   = m.get("charges", {})
-    brokerage = charges.get("brokerage", 0) if isinstance(charges, dict) else 0
-
-    # available equity balance
-    equity    = kite.margins("equity")
-    available = equity["available"]["live_balance"]
+    m        = order_margins[0] if order_margins else {}
+    leverage = m.get("leverage", 1)
+    required = m.get("total", 0)
+    charges  = m.get("charges", {})
 
     return {
-        "symbol":     sym,
-        "ltp":        ltp,
-        "quantity":   qty,
-        "product":    "MIS",
-        "leverage":   leverage,
-        "span":       round(span, 2),
-        "exposure":   round(exposure, 2),
-        "var":        round(var, 2),
-        "brokerage":  round(brokerage, 2),
-        "required":   round(required, 2),
-        "available":  round(available, 2),
-        "sufficient": available >= required,
+        "symbol":         sym,
+        "ltp":            ltp,
+        "quantity":       qty,
+        "product":        "MIS",
+        "leverage":       leverage,
+        "mis_available":  leverage > 1,
+        "span":           round(m.get("span", 0), 2),
+        "exposure":       round(m.get("exposure", 0), 2),
+        "var":            round(m.get("var", 0), 2),
+        "brokerage":      round(charges.get("brokerage", 0) if isinstance(charges, dict) else 0, 2),
+        "required":       round(required, 2),
     }
+
+
+class MarginRequest(BaseModel):
+    symbols: List[str]
+
+
+@app.post("/api/margin")
+def get_margins_api(request: MarginRequest):
+    kite = get_kite()
+    results = {}
+    syms = [s.strip().upper() for s in request.symbols if s.strip()]
+    if not syms:
+        return results
+
+    # batch quote for all symbols at once
+    keys   = [f"NSE:{s}" for s in syms]
+    quotes = kite.quote(keys)
+
+    orders = []
+    sym_qty = {}
+    for s in syms:
+        ltp = quotes.get(f"NSE:{s}", {}).get("last_price", 0)
+        qty = qty_for_ltp(ltp) if ltp else 1
+        sym_qty[s] = (ltp, qty)
+        orders.append({
+            "exchange":         "NSE",
+            "tradingsymbol":    s,
+            "transaction_type": "BUY",
+            "variety":          "regular",
+            "product":          "MIS",
+            "order_type":       "LIMIT",
+            "quantity":         qty,
+            "price":            ltp,
+            "trigger_price":    0,
+        })
+
+    margins = kite.order_margins(orders)
+    for i, s in enumerate(syms):
+        m        = margins[i] if i < len(margins) else {}
+        leverage = m.get("leverage", 1)
+        results[s] = {
+            "leverage":      leverage,
+            "mis_available": leverage > 1,
+            "required":      round(m.get("total", 0), 2),
+        }
+    return results
 
 
 @app.post("/api/stage")

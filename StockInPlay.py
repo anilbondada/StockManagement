@@ -737,6 +737,7 @@ def _render_stocks_table(stocks: list) -> str:
             f'<tr>'
             f'<td><strong>{esc(st["symbol"])}</strong></td>'
             f'<td><span class="stage-cell" data-stage-sym="{esc(st["symbol"])}">—</span></td>'
+            f'<td><span class="margin-cell" data-margin-sym="{esc(st["symbol"])}">—</span></td>'
             f'<td style="color:#9ca3af;font-size:.78rem">{alert_time}</td>'
             f'<td><span class="badge s-{status_key}">{status_label}</span></td>'
             f'<td style="max-width:220px">{detail_cell}</td>'
@@ -745,7 +746,7 @@ def _render_stocks_table(stocks: list) -> str:
         )
     return (
         '<table><thead><tr>'
-        '<th>Symbol</th><th>Stage</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th>'
+        '<th>Symbol</th><th>Stage</th><th>Margin</th><th>Alert</th><th>Status</th><th>Reason / Orders</th><th>Action</th>'
         '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
     )
 
@@ -915,6 +916,37 @@ def sip_control_ui():
       .replace(/Insufficient data/, 'N/A');
     return `<span class="stg-badge ${cls}" title="${stage}">${short}</span>`;
   }
+  const _marginCache = {};
+  function _marginBadge(info) {
+    if (!info) return '<span style="color:#4b5563">—</span>';
+    if (info.mis_available) {
+      return `<span class="stg-badge stg-green" title="MIS leverage: ${info.leverage}x">✓ ${info.leverage}x</span>`;
+    }
+    return `<span class="stg-badge stg-red" title="No MIS leverage">✗ No MIS</span>`;
+  }
+  async function loadMargins(container) {
+    const cells = container ? container.querySelectorAll('[data-margin-sym]') : [];
+    const needed = [...new Set([...cells].map(c => c.dataset.marginSym))]
+                   .filter(s => !_marginCache[s]);
+    if (needed.length) {
+      try {
+        const res = await fetch('/api/margin', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({symbols: needed})
+        });
+        if (res.ok) {
+          const data = await res.json();
+          Object.entries(data).forEach(([sym, info]) => { _marginCache[sym] = info; });
+        }
+      } catch(e) {}
+    }
+    cells.forEach(c => {
+      const info = _marginCache[c.dataset.marginSym];
+      if (info !== undefined) c.outerHTML = _marginBadge(info);
+    });
+  }
+
   async function loadStages(container) {
     const cells = container ? container.querySelectorAll('[data-stage-sym]') : [];
     const needed = [...new Set([...cells].map(c => c.dataset.stageSym))]
@@ -956,6 +988,7 @@ def sip_control_ui():
       const wrap = document.getElementById('sip-stocks-wrap');
       wrap.innerHTML = html;
       loadStages(wrap);
+      loadMargins(wrap);
     } catch(e) {
       document.getElementById('sip-stocks-wrap').innerHTML =
         '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
@@ -997,6 +1030,7 @@ def sip_control_ui():
       const ebWrap = document.getElementById('eb-orders-wrap');
       ebWrap.innerHTML = html;
       loadStages(ebWrap);
+      loadMargins(ebWrap);
     } catch(e) {
       document.getElementById('eb-orders-wrap').innerHTML =
         '<div style="color:#ef4444;font-size:.82rem;padding:8px">Error: ' + (e.message||e) + '</div>';
