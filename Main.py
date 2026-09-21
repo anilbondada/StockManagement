@@ -3925,13 +3925,13 @@ function renderResults(data) {
           <tr>
             <th></th>
             <th onclick="sortBy('Symbol')">Symbol <span class="sort-arrow">↕</span></th>
+            <th onclick="sortBy('WeinsteinStage')">Stage <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('GapUp')">Gap Up <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('EntryTriggered')">Entry Triggered <span class="sort-arrow">↕</span></th>
             <th>Entry Date</th>
             <th onclick="sortBy('MAX_FBR')">Max Retracement <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('MAX_FBG')">Max Gain % <span class="sort-arrow">↕</span></th>
             <th onclick="sortBy('AbsoluteHighAfter')">Abs High <span class="sort-arrow">↕</span></th>
-            <th onclick="sortBy('WeinsteinStage')">Stage <span class="sort-arrow">↕</span></th>
           </tr>
         </thead>
         <tbody id="resultsBody"></tbody>
@@ -3971,13 +3971,13 @@ function renderTableBody(data) {
       rows += `<tr data-idx="${i}">
         <td><button class="expand-btn" onclick="toggleDetail(${i})">+</button></td>
         <td><strong>${r.Symbol}</strong></td>
+        <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
         <td>${yesNo(r.GapUp)}</td>
         <td>${yesNo(r.EntryTriggered)}</td>
         <td>${r.EntryTriggerDate || '—'}</td>
         <td>${maxFbr}</td>
         <td style="font-weight:700;color:${typeof r.MAX_FBG==='number'&&r.MAX_FBG>0?'#16a34a':'inherit'}">${maxFbg}</td>
         <td>${fmt(r.AbsoluteHighAfter,2)}</td>
-        <td><span class="badge ${sClass}" title="${r.WeinsteinStage||''}">${stageShort}</span></td>
       </tr>
       <tr id="${detailId}" style="display:none" class="detail-row">
         ${buildDetailHTML(r)}
@@ -4009,7 +4009,7 @@ function sortBy(col) {
     if (arrow) arrow.textContent = '↕';
   });
   const ths = document.querySelectorAll('thead th');
-  const colNames = ['', 'Symbol', 'GapUp', 'EntryTriggered', 'EntryDate', 'MAX_FBR', 'MAX_FBG', 'AbsoluteHighAfter', 'WeinsteinStage'];
+  const colNames = ['', 'Symbol', 'WeinsteinStage', 'GapUp', 'EntryTriggered', 'EntryDate', 'MAX_FBR', 'MAX_FBG', 'AbsoluteHighAfter'];
   const idx = colNames.indexOf(col);
   if (idx >= 0) {
     ths[idx].classList.add('sorted');
