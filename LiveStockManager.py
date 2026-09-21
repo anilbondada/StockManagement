@@ -299,17 +299,6 @@ def _save_live_candle(token: int, candle: dict, sl_price: float, symbol: str):
         "sl_price": sl_price, "sl_breached": sl_breached,
         "created_at": now,
     }
-    with _db() as conn:
-        conn.execute("""
-            INSERT INTO live_candles
-            (symbol, instrument_token, candle_date, candle_time,
-             open, high, low, close, volume, sl_price, sl_breached, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (row["symbol"], row["instrument_token"], row["candle_date"],
-              row["candle_time"], row["open"], row["high"], row["low"],
-              row["close"], row["volume"], row["sl_price"],
-              row["sl_breached"], row["created_at"]))
-
     broadcast_data = json.dumps({**row, "start": row["candle_time"]})
     if _main._main_loop:
         asyncio.run_coroutine_threadsafe(
