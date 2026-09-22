@@ -299,6 +299,18 @@ def init_db():
                 conn.execute(f"ALTER TABLE swing_shortlist ADD COLUMN {_col} REAL")
         if "max_volume_at" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN max_volume_at TEXT")
+        # Order book snapshots — collected every 5 min during market hours
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS swing_shortlist_orders (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT NOT NULL,
+                date          TEXT NOT NULL,
+                timestamp     TEXT NOT NULL,
+                buy_quantity  INTEGER,
+                sell_quantity INTEGER
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sso_sym_date ON swing_shortlist_orders(symbol, date)")
 
 
 
@@ -791,10 +803,16 @@ def _run_swing_shortlist_analysis():
                 status            = "monitored" if (cond1 and cond2) else "discarded"
                 print(f"[swing-scheduler] {sym}: last={last_price} open={daily_open} prev_close={prev_close} → {status}")
 
-                # Pending order quantities from market quotes (already fetched above)
-                buy_volume  = q.get("buy_quantity")   # total pending buy orders at exchange
-                sell_volume = q.get("sell_quantity")  # total pending sell orders at exchange
-                print(f"[swing-scheduler] {sym}: pending_buy={buy_volume} pending_sell={sell_volume}")
+                # Avg pending order quantities from 5-min snapshots collected throughout the day
+                with _db() as conn2:
+                    row = conn2.execute(
+                        "SELECT AVG(buy_quantity), AVG(sell_quantity), COUNT(*) FROM swing_shortlist_orders WHERE symbol=? AND date=?",
+                        (sym, today)
+                    ).fetchone()
+                buy_volume  = row[0] if row and row[0] is not None else None
+                sell_volume = row[1] if row and row[1] is not None else None
+                snap_count  = row[2] if row else 0
+                print(f"[swing-scheduler] {sym}: avg_pending_buy={buy_volume} avg_pending_sell={sell_volume} (from {snap_count} snapshots)")
 
             with _db() as conn:
                 conn.execute(
@@ -830,6 +848,53 @@ async def _swing_shortlist_scheduler():
         await asyncio.sleep((next_day - now3).total_seconds())
 
 
+def _fetch_swing_orders():
+    """Pull buy_quantity & sell_quantity from kite.quote() for today's shortlist and store a snapshot."""
+    ist_tz  = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist_tz)
+    today   = now_ist.strftime("%Y-%m-%d")
+    ts      = now_ist.isoformat()
+    try:
+        kite = get_kite()
+    except Exception as e:
+        print(f"[swing-orders] Kite not available: {e}")
+        return
+    with _db() as conn:
+        rows = conn.execute("SELECT symbol FROM swing_shortlist WHERE date=?", (today,)).fetchall()
+    symbols = [r[0] for r in rows]
+    if not symbols:
+        return
+    quote_keys = [f"NSE:{s}" for s in symbols]
+    try:
+        quotes = kite.quote(quote_keys)
+    except Exception as e:
+        print(f"[swing-orders] Quote batch failed: {e}")
+        return
+    with _db() as conn:
+        for sym in symbols:
+            q = quotes.get(f"NSE:{sym}")
+            if q:
+                conn.execute(
+                    "INSERT INTO swing_shortlist_orders (symbol, date, timestamp, buy_quantity, sell_quantity) VALUES (?,?,?,?,?)",
+                    (sym, today, ts, q.get("buy_quantity"), q.get("sell_quantity"))
+                )
+    print(f"[swing-orders] Snapshot saved for {len(symbols)} symbols at {ts}")
+
+
+async def _swing_orders_scheduler():
+    """Every 5 min on weekdays during market hours (9:15 AM – 3:30 PM IST), snapshot order book quantities."""
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    while True:
+        await asyncio.sleep(5 * 60)   # wait 5 minutes between each run
+        now = datetime.now(ist_tz)
+        if now.weekday() < 5:         # Mon–Fri only
+            market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            if market_open <= now <= market_close:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _fetch_swing_orders)
+
+
 async def lifespan(_: FastAPI):
     global _access_token, _main_loop
     _main_loop = asyncio.get_running_loop()
@@ -853,9 +918,11 @@ async def lifespan(_: FastAPI):
         _sip_mod.sip_resume()
     eod_task       = asyncio.create_task(_live_eod_cleanup())
     shortlist_task = asyncio.create_task(_swing_shortlist_scheduler())
+    orders_task    = asyncio.create_task(_swing_orders_scheduler())
     yield
     eod_task.cancel()
     shortlist_task.cancel()
+    orders_task.cancel()
     global _ticker_shutdown
     _ticker_shutdown = True
     if _ticker:
