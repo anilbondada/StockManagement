@@ -297,6 +297,8 @@ def init_db():
         for _col in ("avg_volume", "max_volume", "buy_volume", "sell_volume"):
             if _col not in ssl_cols:
                 conn.execute(f"ALTER TABLE swing_shortlist ADD COLUMN {_col} REAL")
+        if "snapshot_count" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN snapshot_count INTEGER")
         if "max_volume_at" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN max_volume_at TEXT")
         # Order book snapshots — collected every 5 min during market hours
@@ -793,6 +795,7 @@ def _run_swing_shortlist_analysis():
             status = None
             avg_volume = max_volume = max_volume_at = None
             buy_volume = sell_volume = None
+            snapshot_count = 0
             q = quotes.get(f"NSE:{sym}")
             if q:
                 last_price        = q.get("last_price", 0)
@@ -809,15 +812,15 @@ def _run_swing_shortlist_analysis():
                         "SELECT AVG(buy_quantity), AVG(sell_quantity), COUNT(*) FROM swing_shortlist_orders WHERE symbol=? AND date=?",
                         (sym, today)
                     ).fetchone()
-                buy_volume  = row[0] if row and row[0] is not None else None
-                sell_volume = row[1] if row and row[1] is not None else None
-                snap_count  = row[2] if row else 0
-                print(f"[swing-scheduler] {sym}: avg_pending_buy={buy_volume} avg_pending_sell={sell_volume} (from {snap_count} snapshots)")
+                buy_volume     = row[0] if row and row[0] is not None else None
+                sell_volume    = row[1] if row and row[1] is not None else None
+                snapshot_count = row[2] if row else 0
+                print(f"[swing-scheduler] {sym}: avg_pending_buy={buy_volume} avg_pending_sell={sell_volume} (from {snapshot_count} snapshots)")
 
             with _db() as conn:
                 conn.execute(
-                    "UPDATE swing_shortlist SET stage=?, status=?, avg_volume=?, max_volume=?, max_volume_at=?, buy_volume=?, sell_volume=? WHERE symbol=?",
-                    (stage, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume, sym)
+                    "UPDATE swing_shortlist SET stage=?, status=?, avg_volume=?, max_volume=?, max_volume_at=?, buy_volume=?, sell_volume=?, snapshot_count=? WHERE symbol=?",
+                    (stage, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume, snapshot_count, sym)
                 )
             print(f"[swing-scheduler] {sym}: stage={stage}")
         except Exception as e:
@@ -4119,7 +4122,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume, snapshot_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -4133,11 +4136,12 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "stage":         r[4],
                 "simulated":     bool(r[5]),
                 "status":        r[6],
-                "avg_volume":    r[7],
-                "max_volume":    r[8],
-                "max_volume_at": r[9],
-                "buy_volume":    r[10],
-                "sell_volume":   r[11],
+                "avg_volume":      r[7],
+                "max_volume":      r[8],
+                "max_volume_at":   r[9],
+                "buy_volume":      r[10],
+                "sell_volume":     r[11],
+                "snapshot_count":  r[12],
             }
             for r in rows
         ]
@@ -4345,7 +4349,7 @@ def swing_shortlist_ui():
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
-        <td><span class="vol-buy">▲ ${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span></td>
+        <td><span class="vol-buy">▲ ${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span>${s.snapshot_count ? `<br><span class="time">${s.snapshot_count} snapshots</span>` : ''}</td>
         <td><span class="vol-sell">▼ ${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span></td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
