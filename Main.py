@@ -779,7 +779,8 @@ def _run_swing_shortlist_analysis():
 
             # Condition check + volume data from quote
             status = None
-            avg_volume = max_volume = buy_volume = sell_volume = max_volume_at = None
+            avg_volume = max_volume = max_volume_at = None
+            buy_volume = sell_volume = None
             q = quotes.get(f"NSE:{sym}")
             if q:
                 last_price        = q.get("last_price", 0)
@@ -790,41 +791,10 @@ def _run_swing_shortlist_analysis():
                 status            = "monitored" if (cond1 and cond2) else "discarded"
                 print(f"[swing-scheduler] {sym}: last={last_price} open={daily_open} prev_close={prev_close} → {status}")
 
-                # Fetch last 30 × 5-min candles using instrument_token from quote
-                # Kite returns cumulative day volume in each candle — compute per-candle deltas
-                instrument_token = q.get("instrument_token")
-                if instrument_token:
-                    try:
-                        now_ist   = datetime.now(ist_tz)
-                        from_dt   = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
-                        candles   = kite.historical_data(instrument_token, from_dt, now_ist, "5minute")
-                        # keep only today's candles (Kite may include previous day data)
-                        today_str = now_ist.strftime("%Y-%m-%d")
-                        candles   = [c for c in candles if str(c["date"]).startswith(today_str)]
-                        # need at least 2 candles to compute deltas; take 31 to get 30 deltas
-                        raw       = candles[-(31):] if len(candles) >= 31 else candles
-                        if len(raw) >= 2:
-                            # per-candle volume = cumulative[i] - cumulative[i-1]
-                            deltas = [max(0, raw[i]["volume"] - raw[i-1]["volume"]) for i in range(1, len(raw))]
-                            # pair each delta with the corresponding candle for buy/sell classification
-                            paired = list(zip(deltas, raw[1:]))
-                            avg_volume   = sum(deltas) / len(deltas)
-                            max_idx      = deltas.index(max(deltas))
-                            max_volume   = deltas[max_idx]
-                            max_candle   = paired[max_idx][1]
-                            max_volume_at = str(max_candle["date"])
-                            buy_dels    = [d for d, c in paired if c["close"] >= c["open"]]
-                            sell_dels   = [d for d, c in paired if c["close"] <  c["open"]]
-                            buy_volume  = sum(buy_dels)  / len(buy_dels)  if buy_dels  else 0
-                            sell_volume = sum(sell_dels) / len(sell_dels) if sell_dels else 0
-                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume}@{max_volume_at} avg_buy={buy_volume:.0f} avg_sell={sell_volume:.0f}")
-                        elif len(raw) == 1:
-                            avg_volume  = raw[0]["volume"]
-                            max_volume  = raw[0]["volume"]
-                            buy_volume  = raw[0]["volume"] if raw[0]["close"] >= raw[0]["open"] else 0
-                            sell_volume = raw[0]["volume"] if raw[0]["close"] <  raw[0]["open"] else 0
-                    except Exception as ve:
-                        print(f"[swing-scheduler] {sym}: candle fetch error — {ve}")
+                # Pending order quantities from market quotes (already fetched above)
+                buy_volume  = q.get("buy_quantity")   # total pending buy orders at exchange
+                sell_volume = q.get("sell_quantity")  # total pending sell orders at exchange
+                print(f"[swing-scheduler] {sym}: pending_buy={buy_volume} pending_sell={sell_volume}")
 
             with _db() as conn:
                 conn.execute(
@@ -4303,18 +4273,13 @@ def swing_shortlist_ui():
     let rows = '';
     stocks.forEach(s => {
       const simTag = s.simulated ? ' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;border-radius:3px;padding:1px 5px;vertical-align:middle">sim</span>' : '';
-      const buySellCell = (s.buy_volume != null)
-        ? `<span class="vol-buy">▲${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span>&nbsp;<span class="vol-sell">▼${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>`
-        : '<span style="color:#4b5563">—</span>';
-      // buy_volume and sell_volume now store per-candle averages (avg of bullish / avg of bearish candles)
       rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
-        <td>${fmtVol(s.avg_volume)}</td>
-        <td>${fmtVol(s.max_volume)}${s.max_volume_at ? `<br><span class="time">${fmtVolTime(s.max_volume_at)}</span>` : ''}</td>
-        <td>${buySellCell}</td>
+        <td><span class="vol-buy">▲ ${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span></td>
+        <td><span class="vol-sell">▼ ${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span></td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
       </tr>`;
@@ -4322,7 +4287,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol on Candle</th><th>Avg Buy / Avg Sell</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Pending Buy</th><th>Pending Sell</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4332,11 +4297,9 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','Avg Vol','Max Vol','Avg Buy Vol','Avg Sell Vol','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Pending Buy','Pending Sell','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
-      s.avg_volume != null ? Math.round(s.avg_volume) : '',
-      s.max_volume != null ? s.max_volume : '',
       s.buy_volume != null ? s.buy_volume : '',
       s.sell_volume != null ? s.sell_volume : '',
       esc(s.first_seen_at || ''), esc(s.last_seen_at || ''), s.simulated ? 1 : 0
