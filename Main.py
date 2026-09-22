@@ -277,8 +277,6 @@ def init_db():
             CREATE TABLE IF NOT EXISTS swing_shortlist (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol          TEXT NOT NULL,
-                trigger_price   REAL,
-                scan_name       TEXT,
                 first_seen_at   TEXT NOT NULL,
                 last_seen_at    TEXT NOT NULL,
                 trigger_count   INTEGER DEFAULT 1,
@@ -3851,35 +3849,25 @@ async def swingtrade_shortlist_webhook(payload: dict):
     now_str = now_ist.isoformat()
     today   = now_ist.strftime("%Y-%m-%d")
 
-    raw_stocks  = payload.get("stocks", "")
-    raw_prices  = payload.get("trigger_prices", "")
-    scan_name   = payload.get("scan_name", "")
-
-    symbols = [s.strip() for s in raw_stocks.split(",") if s.strip()]
-    prices  = [p.strip() for p in raw_prices.split(",")]
+    symbols = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
 
     upserted = []
     with _db() as conn:
-        for i, sym in enumerate(symbols):
-            price = None
-            try:
-                price = float(prices[i]) if i < len(prices) else None
-            except ValueError:
-                pass
+        for sym in symbols:
             existing = conn.execute(
                 "SELECT id, trigger_count FROM swing_shortlist WHERE symbol=?",
                 (sym,)
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, trigger_price=?, date=? WHERE id=?",
-                    (now_str, price, today, existing[0])
+                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=? WHERE id=?",
+                    (now_str, today, existing[0])
                 )
                 upserted.append({"symbol": sym, "action": "updated", "count": existing[1] + 1})
             else:
                 conn.execute(
-                    "INSERT INTO swing_shortlist (symbol, trigger_price, scan_name, first_seen_at, last_seen_at, trigger_count, date) VALUES (?,?,?,?,?,1,?)",
-                    (sym, price, scan_name, now_str, now_str, today)
+                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date) VALUES (?,?,?,1,?)",
+                    (sym, now_str, now_str, today)
                 )
                 upserted.append({"symbol": sym, "action": "inserted", "count": 1})
 
@@ -3893,7 +3881,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, trigger_price, scan_name, first_seen_at, last_seen_at, trigger_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -3901,11 +3889,9 @@ def api_swing_shortlist(date: Optional[str] = None):
         "stocks": [
             {
                 "symbol":        r[0],
-                "trigger_price": r[1],
-                "scan_name":     r[2],
-                "first_seen_at": r[3],
-                "last_seen_at":  r[4],
-                "trigger_count": r[5],
+                "first_seen_at": r[1],
+                "last_seen_at":  r[2],
+                "trigger_count": r[3],
             }
             for r in rows
         ]
@@ -4026,17 +4012,15 @@ def swing_shortlist_ui():
     stocks.forEach(s => {
       rows += `<tr>
         <td><span class="sym">${s.symbol}</span></td>
-        <td><span class="price">₹${fmt(s.trigger_price)}</span></td>
         <td>${countBadge(s.trigger_count)}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
-        <td style="color:#6b7280;font-size:.78rem">${s.scan_name || '—'}</td>
       </tr>`;
     });
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Trigger Price</th><th>Triggers</th><th>First Seen</th><th>Last Seen</th><th>Scan</th>
+          <th>Symbol</th><th>Triggers</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
