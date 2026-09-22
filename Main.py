@@ -290,6 +290,8 @@ def init_db():
         ssl_cols = {r[1] for r in conn.execute("PRAGMA table_info(swing_shortlist)").fetchall()}
         if "stage" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN stage TEXT")
+        if "simulated" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN simulated INTEGER DEFAULT 0")
 
 
 
@@ -3158,6 +3160,15 @@ def simulate_ui():
         "scan_url": "short-term-breakouts",
         "alert_name": "Alert for Short term breakouts"
     }, indent=2)
+    sample_ssl = json.dumps({
+        "stocks": "EMUDHRA,NETWEB,KAYNES,SBIN",
+        "trigger_prices": "950.5,2100.0,3450.0,800.0",
+        "triggered_at": "3:20 pm",
+        "scan_name": "SwingTradeShortlist",
+        "scan_url": "swingtrade-entry-rsi",
+        "alert_name": "SwingTradeShortlist",
+        "webhook_url": "https://www.heaven-hunter.com/webhook/swingtradeshortlist"
+    }, indent=2)
     sample_sip = json.dumps({
         "stocks": "PARAS,NETWEB,KAYNES",
         "trigger_prices": "950.5,2100.0,3450.0",
@@ -3199,6 +3210,9 @@ def simulate_ui():
     .btn-eb:hover {{ background: #4338ca; }}
     .btn-sip     {{ background: #0891b2; color: #fff; }}
     .btn-sip:hover{{ background: #0e7490; }}
+    .btn-ssl     {{ background: #059669; color: #fff; }}
+    .btn-ssl:hover{{ background: #047857; }}
+    .ssl-title   {{ color: #059669; border-color: #a7f3d0; }}
     .btn-reset   {{ background: #f3f4f6; color: #374151; flex: 0 0 90px; }}
     .btn-reset:hover {{ background: #e5e7eb; }}
     button:disabled {{ opacity: .5; cursor: not-allowed; }}
@@ -3228,6 +3242,18 @@ def simulate_ui():
     <div class="toast" id="eb-toast"></div>
   </div>
 
+  <!-- Swing Shortlist card -->
+  <div class="card">
+    <div class="card-title ssl-title">Swing Shortlist — POST /webhook/swingtradeshortlist</div>
+    <label>Payload JSON</label>
+    <textarea id="ssl-payload">{sample_ssl}</textarea>
+    <div class="actions">
+      <button class="btn-ssl" id="sslSendBtn" onclick="sendSSL()">Send to Swing Shortlist</button>
+      <button class="btn-reset" onclick="resetSSL()">Reset</button>
+    </div>
+    <div class="toast" id="ssl-toast"></div>
+  </div>
+
   <!-- StockInPlay card -->
   <div class="card">
     <div class="card-title sip-title">StockInPlay — POST /webhook/stockinplay</div>
@@ -3249,6 +3275,7 @@ def simulate_ui():
   <script>
     const SAMPLE_EB  = {json.dumps(sample_eb)};
     const SAMPLE_SIP = {json.dumps(sample_sip)};
+    const SAMPLE_SSL = {json.dumps(sample_ssl)};
 
     /* ── EarlyBloom (WebSocket) ── */
     async function sendEB() {{
@@ -3334,6 +3361,42 @@ def simulate_ui():
     function resetSIP() {{
       document.getElementById('sip-payload').value = SAMPLE_SIP;
       document.getElementById('sip-toast').className = 'toast';
+    }}
+
+    async function sendSSL() {{
+      const btn   = document.getElementById('sslSendBtn');
+      const toast = document.getElementById('ssl-toast');
+      const raw   = document.getElementById('ssl-payload').value;
+      toast.className = 'toast';
+      let parsed;
+      try {{ parsed = JSON.parse(raw); }}
+      catch (e) {{ toast.textContent = 'Invalid JSON: ' + e.message; toast.className = 'toast err'; return; }}
+
+      parsed._simulate = true;
+
+      btn.disabled = true; btn.textContent = 'Sending...';
+      try {{
+        const r    = await fetch('/webhook/swingtradeshortlist', {{
+          method: 'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify(parsed)
+        }});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+        const syms = (data.symbols || []).map(s => s.symbol + ' (' + s.action + ')').join(', ') || 'none';
+        toast.textContent = 'Received: ' + data.received +
+          '\\nDate: ' + (data.date || '?') +
+          '\\nSymbols: ' + syms;
+        toast.className = 'toast ok';
+      }} catch (e) {{
+        toast.textContent = 'Error: ' + e.message; toast.className = 'toast err';
+      }} finally {{
+        btn.disabled = false; btn.textContent = 'Send to Swing Shortlist';
+      }}
+    }}
+    function resetSSL() {{
+      document.getElementById('ssl-payload').value = SAMPLE_SSL;
+      document.getElementById('ssl-toast').className = 'toast';
     }}
   </script>
 </body>
@@ -3909,7 +3972,8 @@ async def swingtrade_shortlist_webhook(payload: dict):
     now_str = now_ist.isoformat()
     today   = now_ist.strftime("%Y-%m-%d")
 
-    symbols = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
+    symbols   = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
+    simulated = 1 if payload.get("_simulate") else 0
 
     upserted = []
     with _db() as conn:
@@ -3920,14 +3984,14 @@ async def swingtrade_shortlist_webhook(payload: dict):
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=? WHERE id=?",
-                    (now_str, today, existing[0])
+                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=? WHERE id=?",
+                    (now_str, today, simulated, existing[0])
                 )
                 upserted.append({"symbol": sym, "action": "updated", "count": existing[1] + 1})
             else:
                 conn.execute(
-                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date) VALUES (?,?,?,1,?)",
-                    (sym, now_str, now_str, today)
+                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date, simulated) VALUES (?,?,?,1,?,?)",
+                    (sym, now_str, now_str, today, simulated)
                 )
                 upserted.append({"symbol": sym, "action": "inserted", "count": 1})
 
@@ -3949,7 +4013,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -3961,6 +4025,7 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "last_seen_at":  r[2],
                 "trigger_count": r[3],
                 "stage":         r[4],
+                "simulated":     bool(r[5]),
             }
             for r in rows
         ]
@@ -4101,8 +4166,9 @@ def swing_shortlist_ui():
     }
     let rows = '';
     stocks.forEach(s => {
+      const simTag = s.simulated ? ' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;border-radius:3px;padding:1px 5px;vertical-align:middle">sim</span>' : '';
       rows += `<tr>
-        <td><span class="sym">${s.symbol}</span></td>
+        <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
         <td>${stageBadge(s.stage)}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
