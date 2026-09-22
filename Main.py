@@ -789,20 +789,31 @@ def _run_swing_shortlist_analysis():
                 print(f"[swing-scheduler] {sym}: last={last_price} open={daily_open} prev_close={prev_close} → {status}")
 
                 # Fetch last 30 × 5-min candles using instrument_token from quote
+                # Kite returns cumulative day volume in each candle — compute per-candle deltas
                 instrument_token = q.get("instrument_token")
                 if instrument_token:
                     try:
                         now_ist   = datetime.now(ist_tz)
                         from_dt   = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
                         candles   = kite.historical_data(instrument_token, from_dt, now_ist, "5minute")
-                        last30    = candles[-30:] if len(candles) >= 30 else candles
-                        if last30:
-                            vols      = [c["volume"] for c in last30]
-                            avg_volume  = sum(vols) / len(vols)
-                            max_volume  = max(vols)
-                            buy_volume  = sum(c["volume"] for c in last30 if c["close"] >= c["open"])
-                            sell_volume = sum(c["volume"] for c in last30 if c["close"] <  c["open"])
-                            print(f"[swing-scheduler] {sym}: avg_vol={avg_volume:.0f} max_vol={max_volume} buy={buy_volume} sell={sell_volume}")
+                        # need at least 2 candles to compute deltas; take 31 to get 30 deltas
+                        raw       = candles[-(31):] if len(candles) >= 31 else candles
+                        if len(raw) >= 2:
+                            # per-candle volume = cumulative[i] - cumulative[i-1]
+                            deltas = [max(0, raw[i]["volume"] - raw[i-1]["volume"]) for i in range(1, len(raw))]
+                            # pair each delta with the corresponding candle for buy/sell classification
+                            paired = list(zip(deltas, raw[1:]))
+                            avg_volume  = sum(deltas) / len(deltas)
+                            max_volume  = max(deltas)
+                            buy_volume  = sum(d for d, c in paired if c["close"] >= c["open"])
+                            sell_volume = sum(d for d, c in paired if c["close"] <  c["open"])
+                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume} buy={buy_volume} sell={sell_volume}")
+                        elif len(raw) == 1:
+                            # only one candle returned — use its volume directly (first candle of day)
+                            avg_volume  = raw[0]["volume"]
+                            max_volume  = raw[0]["volume"]
+                            buy_volume  = raw[0]["volume"] if raw[0]["close"] >= raw[0]["open"] else 0
+                            sell_volume = raw[0]["volume"] if raw[0]["close"] <  raw[0]["open"] else 0
                     except Exception as ve:
                         print(f"[swing-scheduler] {sym}: candle fetch error — {ve}")
 
@@ -4269,16 +4280,17 @@ def swing_shortlist_ui():
     let rows = '';
     stocks.forEach(s => {
       const simTag = s.simulated ? ' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;border-radius:3px;padding:1px 5px;vertical-align:middle">sim</span>' : '';
-      const buySelTag = (s.buy_volume != null)
-        ? `<br><span class="vol-buy">▲${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>`
-        : '';
+      const buySellCell = (s.buy_volume != null)
+        ? `<span class="vol-buy">▲${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span>&nbsp;<span class="vol-sell">▼${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>`
+        : '<span style="color:#4b5563">—</span>';
       rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
-        <td>${fmtVol(s.avg_volume)}${buySelTag}</td>
+        <td>${fmtVol(s.avg_volume)}</td>
         <td>${fmtVol(s.max_volume)}</td>
+        <td>${buySellCell}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
       </tr>`;
@@ -4286,7 +4298,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol (5m×30)</th><th>Max Vol</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol</th><th>Buy / Sell Vol</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4296,7 +4308,7 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','Avg Volume','Max Volume','Buy Volume','Sell Volume','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Avg Vol (per candle)','Max Vol (per candle)','Buy Vol (total)','Sell Vol (total)','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
       s.avg_volume != null ? Math.round(s.avg_volume) : '',
