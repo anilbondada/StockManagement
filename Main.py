@@ -272,6 +272,20 @@ def init_db():
         ca_cols = {r[1] for r in conn.execute("PRAGMA table_info(chartink_alerts)").fetchall()}
         if "status" not in ca_cols:
             conn.execute("ALTER TABLE chartink_alerts ADD COLUMN status TEXT DEFAULT 'received'")
+        # Swing trade shortlist table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS swing_shortlist (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol          TEXT NOT NULL,
+                trigger_price   REAL,
+                scan_name       TEXT,
+                first_seen_at   TEXT NOT NULL,
+                last_seen_at    TEXT NOT NULL,
+                trigger_count   INTEGER DEFAULT 1,
+                date            TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_swing_shortlist_sym_date ON swing_shortlist(symbol, date)")
 
 
 
@@ -1117,6 +1131,17 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;paddi
       </div>
       <div class="card-name">Swing Analysis</div>
       <div class="card-desc">Fibonacci retracement, gain &amp; Weinstein stage</div>
+    </a>
+
+    <a class="card" href="/swing-shortlist">
+      <div class="icon icon-green">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M9 11l3 3L22 4"/>
+          <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+        </svg>
+      </div>
+      <div class="card-name">Swing Shortlist</div>
+      <div class="card-desc">ChartInk webhook — daily shortlisted stocks &amp; trigger counts</div>
     </a>
 
     <a class="card" href="/chartink-alerts">
@@ -3811,6 +3836,220 @@ def get_stages_api(request: StageRequest):
     for symbol in [s.strip().upper() for s in request.symbols if s.strip()]:
         results[symbol] = sa.get_stage(kite, symbol, today)
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SWING TRADE SHORTLIST WEBHOOK + MONITORING PAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/webhook/swingtradeshortlist")
+async def swingtrade_shortlist_webhook(payload: dict):
+    ist_tz  = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist_tz)
+    now_str = now_ist.isoformat()
+    today   = now_ist.strftime("%Y-%m-%d")
+
+    raw_stocks  = payload.get("stocks", "")
+    raw_prices  = payload.get("trigger_prices", "")
+    scan_name   = payload.get("scan_name", "")
+
+    symbols = [s.strip() for s in raw_stocks.split(",") if s.strip()]
+    prices  = [p.strip() for p in raw_prices.split(",")]
+
+    upserted = []
+    with _db() as conn:
+        for i, sym in enumerate(symbols):
+            price = None
+            try:
+                price = float(prices[i]) if i < len(prices) else None
+            except ValueError:
+                pass
+            existing = conn.execute(
+                "SELECT id, trigger_count FROM swing_shortlist WHERE symbol=? AND date=?",
+                (sym, today)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, trigger_price=? WHERE id=?",
+                    (now_str, price, existing[0])
+                )
+                upserted.append({"symbol": sym, "action": "updated", "count": existing[1] + 1})
+            else:
+                conn.execute(
+                    "INSERT INTO swing_shortlist (symbol, trigger_price, scan_name, first_seen_at, last_seen_at, trigger_count, date) VALUES (?,?,?,?,?,1,?)",
+                    (sym, price, scan_name, now_str, now_str, today)
+                )
+                upserted.append({"symbol": sym, "action": "inserted", "count": 1})
+
+    print(f"[swing-shortlist] {len(symbols)} symbols — {upserted}")
+    return {"received": True, "date": today, "symbols": upserted}
+
+
+@app.get("/api/swing-shortlist")
+def api_swing_shortlist(date: Optional[str] = None):
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT symbol, trigger_price, scan_name, first_seen_at, last_seen_at, trigger_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            (target,)
+        ).fetchall()
+    return {
+        "date": target,
+        "stocks": [
+            {
+                "symbol":        r[0],
+                "trigger_price": r[1],
+                "scan_name":     r[2],
+                "first_seen_at": r[3],
+                "last_seen_at":  r[4],
+                "trigger_count": r[5],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/swing-shortlist", response_class=HTMLResponse)
+def swing_shortlist_ui():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Swing Shortlist</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#e2e8f0;padding:20px 16px;min-height:100vh}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{font-size:1.25rem;font-weight:700;color:#fff}
+    .meta{font-size:.8rem;color:#6b7280;margin-top:3px}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input[type=date]{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:8px;color:#e2e8f0;padding:6px 10px;font-size:.83rem}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer;background:#2a2a3e;color:#9ca3af;text-decoration:none;display:inline-flex;align-items:center}
+    .btn:hover{background:#374151;color:#e2e8f0}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-primary:hover{background:#4338ca}
+    .card{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:12px;padding:18px;margin-bottom:16px}
+    .summary{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px}
+    .stat{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:10px;padding:14px 20px;min-width:120px}
+    .stat-label{font-size:.72rem;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+    .stat-value{font-size:1.5rem;font-weight:700;color:#fff}
+    table{width:100%;border-collapse:collapse;font-size:.85rem}
+    thead th{padding:10px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #2a2a3e}
+    tbody tr{border-bottom:1px solid #1a1a2e;transition:.1s}
+    tbody tr:hover{background:#1a1a2e}
+    td{padding:10px 12px;vertical-align:middle}
+    .sym{font-weight:700;color:#e2e8f0;font-size:.92rem}
+    .price{color:#a5b4fc;font-weight:600}
+    .time{color:#6b7280;font-size:.78rem}
+    .count-badge{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:22px;border-radius:999px;font-size:.75rem;font-weight:700;padding:0 8px}
+    .count-1{background:#1e3a5f;color:#93c5fd}
+    .count-2{background:#14532d;color:#86efac}
+    .count-3{background:#431407;color:#fb923c}
+    .count-hi{background:#450a0a;color:#fca5a5}
+    .empty{text-align:center;padding:40px;color:#4b5563}
+    .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+    .dot-green{background:#22c55e;animation:pulse 1.2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  </style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>Swing Trade Shortlist</h1>
+    <div class="meta"><span class="dot dot-green" id="dot"></span><span id="last-updated">Loading…</span></div>
+  </div>
+  <div class="controls">
+    <input type="date" id="dateInput" onchange="load()"/>
+    <button class="btn btn-primary" onclick="load()">Refresh</button>
+    <a href="/" class="btn">← Home</a>
+  </div>
+</div>
+
+<div class="summary" id="summary"></div>
+
+<div class="card">
+  <div id="tableWrap"><div class="empty">Loading…</div></div>
+</div>
+
+<script>
+  const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:true, timeZone:'Asia/Kolkata'});
+    } catch { return iso.slice(11,16); }
+  }
+
+  function countBadge(n) {
+    const cls = n === 1 ? 'count-1' : n === 2 ? 'count-2' : n === 3 ? 'count-3' : 'count-hi';
+    return `<span class="count-badge ${cls}">${n}</span>`;
+  }
+
+  async function load() {
+    const date = document.getElementById('dateInput').value || '';
+    const url  = '/api/swing-shortlist' + (date ? '?date=' + date : '');
+    try {
+      const data = await fetch(url).then(r => r.json());
+      renderSummary(data);
+      renderTable(data);
+      document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Asia/Kolkata'});
+    } catch(e) {
+      document.getElementById('tableWrap').innerHTML = '<div class="empty" style="color:#f87171">Error: ' + e.message + '</div>';
+    }
+  }
+
+  function renderSummary(data) {
+    const stocks = data.stocks || [];
+    const multi  = stocks.filter(s => s.trigger_count > 1).length;
+    const maxCount = stocks.reduce((m, s) => Math.max(m, s.trigger_count), 0);
+    document.getElementById('summary').innerHTML = `
+      <div class="stat"><div class="stat-label">Total Stocks</div><div class="stat-value">${stocks.length}</div></div>
+      <div class="stat"><div class="stat-label">Multi-trigger</div><div class="stat-value" style="color:#fb923c">${multi}</div></div>
+      <div class="stat"><div class="stat-label">Max Triggers</div><div class="stat-value" style="color:#fca5a5">${maxCount || '—'}</div></div>
+      <div class="stat"><div class="stat-label">Date</div><div class="stat-value" style="font-size:1rem;padding-top:4px">${data.date}</div></div>
+    `;
+  }
+
+  function renderTable(data) {
+    const stocks = data.stocks || [];
+    if (!stocks.length) {
+      document.getElementById('tableWrap').innerHTML = '<div class="empty">No stocks received for this date.</div>';
+      return;
+    }
+    let rows = '';
+    stocks.forEach(s => {
+      rows += `<tr>
+        <td><span class="sym">${s.symbol}</span></td>
+        <td><span class="price">₹${fmt(s.trigger_price)}</span></td>
+        <td>${countBadge(s.trigger_count)}</td>
+        <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
+        <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
+        <td style="color:#6b7280;font-size:.78rem">${s.scan_name || '—'}</td>
+      </tr>`;
+    });
+    document.getElementById('tableWrap').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Symbol</th><th>Trigger Price</th><th>Triggers</th><th>First Seen</th><th>Last Seen</th><th>Scan</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // set today's date as default
+  const ist = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Kolkata'}));
+  const pad = n => String(n).padStart(2,'0');
+  document.getElementById('dateInput').value = `${ist.getFullYear()}-${pad(ist.getMonth()+1)}-${pad(ist.getDate())}`;
+
+  load();
+  setInterval(load, 30000);
+</script>
+</body>
+</html>"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
