@@ -297,6 +297,8 @@ def init_db():
         for _col in ("avg_volume", "max_volume", "buy_volume", "sell_volume"):
             if _col not in ssl_cols:
                 conn.execute(f"ALTER TABLE swing_shortlist ADD COLUMN {_col} REAL")
+        if "max_volume_at" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN max_volume_at TEXT")
 
 
 
@@ -777,7 +779,7 @@ def _run_swing_shortlist_analysis():
 
             # Condition check + volume data from quote
             status = None
-            avg_volume = max_volume = buy_volume = sell_volume = None
+            avg_volume = max_volume = buy_volume = sell_volume = max_volume_at = None
             q = quotes.get(f"NSE:{sym}")
             if q:
                 last_price        = q.get("last_price", 0)
@@ -803,13 +805,16 @@ def _run_swing_shortlist_analysis():
                             deltas = [max(0, raw[i]["volume"] - raw[i-1]["volume"]) for i in range(1, len(raw))]
                             # pair each delta with the corresponding candle for buy/sell classification
                             paired = list(zip(deltas, raw[1:]))
-                            avg_volume  = sum(deltas) / len(deltas)
-                            max_volume  = max(deltas)
+                            avg_volume   = sum(deltas) / len(deltas)
+                            max_idx      = deltas.index(max(deltas))
+                            max_volume   = deltas[max_idx]
+                            max_candle   = paired[max_idx][1]
+                            max_volume_at = str(max_candle["date"])
                             buy_dels    = [d for d, c in paired if c["close"] >= c["open"]]
                             sell_dels   = [d for d, c in paired if c["close"] <  c["open"]]
                             buy_volume  = sum(buy_dels)  / len(buy_dels)  if buy_dels  else 0
                             sell_volume = sum(sell_dels) / len(sell_dels) if sell_dels else 0
-                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume} avg_buy={buy_volume:.0f} avg_sell={sell_volume:.0f}")
+                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume}@{max_volume_at} avg_buy={buy_volume:.0f} avg_sell={sell_volume:.0f}")
                         elif len(raw) == 1:
                             avg_volume  = raw[0]["volume"]
                             max_volume  = raw[0]["volume"]
@@ -820,8 +825,8 @@ def _run_swing_shortlist_analysis():
 
             with _db() as conn:
                 conn.execute(
-                    "UPDATE swing_shortlist SET stage=?, status=?, avg_volume=?, max_volume=?, buy_volume=?, sell_volume=? WHERE symbol=?",
-                    (stage, status, avg_volume, max_volume, buy_volume, sell_volume, sym)
+                    "UPDATE swing_shortlist SET stage=?, status=?, avg_volume=?, max_volume=?, max_volume_at=?, buy_volume=?, sell_volume=? WHERE symbol=?",
+                    (stage, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume, sym)
                 )
             print(f"[swing-scheduler] {sym}: stage={stage}")
         except Exception as e:
@@ -4074,7 +4079,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, buy_volume, sell_volume FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -4090,8 +4095,9 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "status":        r[6],
                 "avg_volume":    r[7],
                 "max_volume":    r[8],
-                "buy_volume":    r[9],
-                "sell_volume":   r[10],
+                "max_volume_at": r[9],
+                "buy_volume":    r[10],
+                "sell_volume":   r[11],
             }
             for r in rows
         ]
@@ -4291,7 +4297,7 @@ def swing_shortlist_ui():
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
         <td>${fmtVol(s.avg_volume)}</td>
-        <td>${fmtVol(s.max_volume)}</td>
+        <td>${fmtVol(s.max_volume)}${s.max_volume_at ? `<br><span class="time">${fmtTime(s.max_volume_at)}</span>` : ''}</td>
         <td>${buySellCell}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
@@ -4300,7 +4306,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol</th><th>Avg Buy / Avg Sell</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol on Candle</th><th>Avg Buy / Avg Sell</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
