@@ -4141,7 +4141,7 @@ def api_swing_shortlist(date: Optional[str] = None):
             FROM swing_shortlist sl
             WHERE sl.date=?
             ORDER BY sl.trigger_count DESC, sl.first_seen_at ASC
-        """, (target,)*10 + (target,)).fetchall()
+        """, (target,)*10).fetchall()
     return {
         "date": target,
         "stocks": [
