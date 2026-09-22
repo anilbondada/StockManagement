@@ -292,6 +292,8 @@ def init_db():
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN stage TEXT")
         if "simulated" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN simulated INTEGER DEFAULT 0")
+        if "status" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN status TEXT")
 
 
 
@@ -756,13 +758,38 @@ def _run_swing_shortlist_analysis():
         print("[swing-scheduler] No shortlisted stocks for today.")
         return
     print(f"[swing-scheduler] Running stage analysis for {len(symbols)} stocks: {symbols}")
+
+    # Batch quote to check daily conditions
+    quote_keys = [f"NSE:{s}" for s in symbols]
+    quotes = {}
+    try:
+        quotes = kite.quote(quote_keys)
+    except Exception as e:
+        print(f"[swing-scheduler] Quote batch failed: {e}")
+
     for sym in symbols:
         try:
             result = sa.get_stage(kite, sym)
             stage  = result.get("WeinsteinStage", "—") if result else "—"
+
+            # Condition check: close > open AND close > prev day close
+            status = None
+            q = quotes.get(f"NSE:{sym}")
+            if q:
+                last_price   = q.get("last_price", 0)
+                daily_open   = q.get("ohlc", {}).get("open", 0)
+                prev_close   = q.get("ohlc", {}).get("close", 0)
+                cond1 = last_price > daily_open   # close > open (green candle)
+                cond2 = last_price > prev_close   # close > prev day close
+                status = "monitored" if (cond1 and cond2) else "discarded"
+                print(f"[swing-scheduler] {sym}: last={last_price} open={daily_open} prev_close={prev_close} → {status}")
+
             with _db() as conn:
-                conn.execute("UPDATE swing_shortlist SET stage=? WHERE symbol=?", (stage, sym))
-            print(f"[swing-scheduler] {sym}: {stage}")
+                conn.execute(
+                    "UPDATE swing_shortlist SET stage=?, status=? WHERE symbol=?",
+                    (stage, status, sym)
+                )
+            print(f"[swing-scheduler] {sym}: stage={stage}")
         except Exception as e:
             print(f"[swing-scheduler] {sym}: error — {e}")
     print("[swing-scheduler] Done.")
@@ -4013,7 +4040,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -4026,6 +4053,7 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "trigger_count": r[3],
                 "stage":         r[4],
                 "simulated":     bool(r[5]),
+                "status":        r[6],
             }
             for r in rows
         ]
@@ -4081,6 +4109,13 @@ def swing_shortlist_ui():
     .stg-yellow{background:#44350a;color:#fde68a}
     .stg-blue{background:#1e3a5f;color:#93c5fd}
     .stg-gray{background:#1f2937;color:#6b7280}
+    .status-monitored{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
+    .status-discarded{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
+    .status-pending{color:#4b5563;font-size:.78rem}
+    .filter-tabs{display:flex;gap:8px;margin-bottom:12px}
+    .tab-btn{padding:5px 16px;border-radius:6px;border:1px solid #2a2a3e;background:#0f0f1a;color:#9ca3af;cursor:pointer;font-size:.82rem;font-weight:600;transition:.15s}
+    .tab-btn.active{background:#312e81;color:#a5b4fc;border-color:#4338ca}
+    .tab-btn:hover:not(.active){background:#1a1a2e;color:#e2e8f0}
   </style>
 </head>
 <body>
@@ -4100,11 +4135,20 @@ def swing_shortlist_ui():
 <div class="summary" id="summary"></div>
 
 <div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div class="filter-tabs" id="filterTabs">
+      <button class="tab-btn active" onclick="setFilter('all',this)">All</button>
+      <button class="tab-btn" onclick="setFilter('monitored',this)">Monitored</button>
+      <button class="tab-btn" onclick="setFilter('discarded',this)">Discarded</button>
+    </div>
+    <button class="btn" onclick="exportCSV()" title="Export filtered view as CSV">⬇ Export CSV</button>
+  </div>
   <div id="tableWrap"><div class="empty">Loading…</div></div>
 </div>
 
 <script>
-  const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+  let _allStocks = [];
+  let _activeFilter = 'all';
 
   function stageBadge(stage) {
     if (!stage) return '<span style="color:#4b5563;font-size:.78rem">—</span>';
@@ -4120,6 +4164,12 @@ def swing_shortlist_ui():
     return `<span class="stg-badge ${cls}" title="${stage}">${short}</span>`;
   }
 
+  function statusBadge(status) {
+    if (!status) return '<span class="status-pending">—</span>';
+    if (status === 'monitored') return '<span class="status-monitored">✓ Monitored</span>';
+    return '<span class="status-discarded">✗ Discarded</span>';
+  }
+
   function fmtTime(iso) {
     if (!iso) return '—';
     try {
@@ -4133,43 +4183,60 @@ def swing_shortlist_ui():
     return `<span class="count-badge ${cls}">${n}</span>`;
   }
 
+  function setFilter(f, btn) {
+    _activeFilter = f;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderTable();
+  }
+
+  function filteredStocks() {
+    if (_activeFilter === 'monitored') return _allStocks.filter(s => s.status === 'monitored');
+    if (_activeFilter === 'discarded') return _allStocks.filter(s => s.status === 'discarded');
+    return _allStocks;
+  }
+
   async function load() {
     const date = document.getElementById('dateInput').value || '';
     const url  = '/api/swing-shortlist' + (date ? '?date=' + date : '');
     try {
       const data = await fetch(url).then(r => r.json());
-      renderSummary(data);
-      renderTable(data);
+      _allStocks = data.stocks || [];
+      renderSummary(data.date);
+      renderTable();
       document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Asia/Kolkata'});
     } catch(e) {
       document.getElementById('tableWrap').innerHTML = '<div class="empty" style="color:#f87171">Error: ' + e.message + '</div>';
     }
   }
 
-  function renderSummary(data) {
-    const stocks = data.stocks || [];
-    const multi  = stocks.filter(s => s.trigger_count > 1).length;
-    const maxCount = stocks.reduce((m, s) => Math.max(m, s.trigger_count), 0);
+  function renderSummary(date) {
+    const stocks    = _allStocks;
+    const multi     = stocks.filter(s => s.trigger_count > 1).length;
+    const maxCount  = stocks.reduce((m, s) => Math.max(m, s.trigger_count), 0);
+    const monitored = stocks.filter(s => s.status === 'monitored').length;
     document.getElementById('summary').innerHTML = `
       <div class="stat"><div class="stat-label">Total Stocks</div><div class="stat-value">${stocks.length}</div></div>
+      <div class="stat"><div class="stat-label">Monitored</div><div class="stat-value" style="color:#86efac">${monitored}</div></div>
       <div class="stat"><div class="stat-label">Multi-trigger</div><div class="stat-value" style="color:#fb923c">${multi}</div></div>
       <div class="stat"><div class="stat-label">Max Triggers</div><div class="stat-value" style="color:#fca5a5">${maxCount || '—'}</div></div>
-      <div class="stat"><div class="stat-label">Date</div><div class="stat-value" style="font-size:1rem;padding-top:4px">${data.date}</div></div>
+      <div class="stat"><div class="stat-label">Date</div><div class="stat-value" style="font-size:1rem;padding-top:4px">${date}</div></div>
     `;
   }
 
-  function renderTable(data) {
-    const stocks = data.stocks || [];
+  function renderTable() {
+    const stocks = filteredStocks();
     if (!stocks.length) {
-      document.getElementById('tableWrap').innerHTML = '<div class="empty">No stocks received for this date.</div>';
+      document.getElementById('tableWrap').innerHTML = '<div class="empty">No stocks for this filter.</div>';
       return;
     }
     let rows = '';
     stocks.forEach(s => {
       const simTag = s.simulated ? ' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;border-radius:3px;padding:1px 5px;vertical-align:middle">sim</span>' : '';
-      rows += `<tr>
+      rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
+        <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
@@ -4178,10 +4245,28 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Stage</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+  }
+
+  function exportCSV() {
+    const stocks = filteredStocks();
+    if (!stocks.length) { alert('No data to export.'); return; }
+    const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const header = ['Symbol','Triggers','Status','Stage','First Seen','Last Seen','Simulated'];
+    const rows   = stocks.map(s => [
+      esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
+      esc(s.first_seen_at || ''), esc(s.last_seen_at || ''), s.simulated ? 1 : 0
+    ].join(','));
+    const csv  = [header.join(','), ...rows].join('\\n');
+    const blob = new Blob([csv], {type:'text/csv'});
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    const date = document.getElementById('dateInput').value || 'today';
+    a.download = `swing-shortlist-${_activeFilter}-${date}.csv`;
+    a.click();
   }
 
   async function runAnalysis() {
