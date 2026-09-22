@@ -285,7 +285,9 @@ def init_db():
                 date            TEXT NOT NULL
             )
         """)
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_swing_shortlist_sym_date ON swing_shortlist(symbol, date)")
+        # Drop old (symbol, date) index if it exists, replace with symbol-only unique index
+        conn.execute("DROP INDEX IF EXISTS ux_swing_shortlist_sym_date")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_swing_shortlist_sym ON swing_shortlist(symbol)")
 
 
 
@@ -3865,13 +3867,13 @@ async def swingtrade_shortlist_webhook(payload: dict):
             except ValueError:
                 pass
             existing = conn.execute(
-                "SELECT id, trigger_count FROM swing_shortlist WHERE symbol=? AND date=?",
-                (sym, today)
+                "SELECT id, trigger_count FROM swing_shortlist WHERE symbol=?",
+                (sym,)
             ).fetchone()
             if existing:
                 conn.execute(
-                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, trigger_price=? WHERE id=?",
-                    (now_str, price, existing[0])
+                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, trigger_price=?, date=? WHERE id=?",
+                    (now_str, price, today, existing[0])
                 )
                 upserted.append({"symbol": sym, "action": "updated", "count": existing[1] + 1})
             else:
