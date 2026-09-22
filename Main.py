@@ -280,12 +280,16 @@ def init_db():
                 first_seen_at   TEXT NOT NULL,
                 last_seen_at    TEXT NOT NULL,
                 trigger_count   INTEGER DEFAULT 1,
-                date            TEXT NOT NULL
+                date            TEXT NOT NULL,
+                stage           TEXT
             )
         """)
         # Drop old (symbol, date) index if it exists, replace with symbol-only unique index
         conn.execute("DROP INDEX IF EXISTS ux_swing_shortlist_sym_date")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_swing_shortlist_sym ON swing_shortlist(symbol)")
+        ssl_cols = {r[1] for r in conn.execute("PRAGMA table_info(swing_shortlist)").fetchall()}
+        if "stage" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN stage TEXT")
 
 
 
@@ -731,6 +735,60 @@ def fetch_and_store_candles(alert_id: int, symbols: list[str], date_str: str, sk
 
 
 
+def _run_swing_shortlist_analysis():
+    """Run get_stage() for every stock in today's swing shortlist and store the result."""
+    import SwingAnalysis as sa
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    today  = datetime.now(ist_tz).strftime("%Y-%m-%d")
+    try:
+        kite = get_kite()
+    except Exception as e:
+        print(f"[swing-scheduler] Kite not available: {e}")
+        return
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT symbol FROM swing_shortlist WHERE date=?", (today,)
+        ).fetchall()
+    symbols = [r[0] for r in rows]
+    if not symbols:
+        print("[swing-scheduler] No shortlisted stocks for today.")
+        return
+    print(f"[swing-scheduler] Running stage analysis for {len(symbols)} stocks: {symbols}")
+    for sym in symbols:
+        try:
+            result = sa.get_stage(kite, sym)
+            stage  = result.get("WeinsteinStage", "—") if result else "—"
+            with _db() as conn:
+                conn.execute("UPDATE swing_shortlist SET stage=? WHERE symbol=?", (stage, sym))
+            print(f"[swing-scheduler] {sym}: {stage}")
+        except Exception as e:
+            print(f"[swing-scheduler] {sym}: error — {e}")
+    print("[swing-scheduler] Done.")
+
+
+async def _swing_shortlist_scheduler():
+    """Runs get_stage analysis for today's shortlist at 3:30 PM IST on weekdays, then loops daily."""
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    while True:
+        now      = datetime.now(ist_tz)
+        # Skip weekends
+        if now.weekday() < 5:  # Mon–Fri
+            target = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            wait   = (target - now).total_seconds()
+            if wait > 0:
+                print(f"[swing-scheduler] Scheduled for 3:30 PM IST ({wait:.0f}s from now)")
+                await asyncio.sleep(wait)
+            # Run if we're within 60s window (handles restart after 3:30)
+            now2 = datetime.now(ist_tz)
+            if now2.weekday() < 5:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _run_swing_shortlist_analysis)
+        # Sleep until next day's 3:29 PM check
+        now3      = datetime.now(ist_tz)
+        next_day  = (now3 + timedelta(days=1)).replace(hour=15, minute=29, second=0, microsecond=0)
+        await asyncio.sleep((next_day - now3).total_seconds())
+
+
 async def lifespan(_: FastAPI):
     global _access_token, _main_loop
     _main_loop = asyncio.get_running_loop()
@@ -752,9 +810,11 @@ async def lifespan(_: FastAPI):
         import StockInPlay as _sip_mod
         eb_resume()
         _sip_mod.sip_resume()
-    eod_task = asyncio.create_task(_live_eod_cleanup())
+    eod_task       = asyncio.create_task(_live_eod_cleanup())
+    shortlist_task = asyncio.create_task(_swing_shortlist_scheduler())
     yield
     eod_task.cancel()
+    shortlist_task.cancel()
     global _ticker_shutdown
     _ticker_shutdown = True
     if _ticker:
@@ -3875,13 +3935,21 @@ async def swingtrade_shortlist_webhook(payload: dict):
     return {"received": True, "date": today, "symbols": upserted}
 
 
+@app.post("/api/swing-shortlist/run-analysis")
+async def api_run_swing_analysis():
+    """Manually trigger stage analysis for today's shortlist."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _run_swing_shortlist_analysis)
+    return {"status": "done"}
+
+
 @app.get("/api/swing-shortlist")
 def api_swing_shortlist(date: Optional[str] = None):
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -3892,6 +3960,7 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "first_seen_at": r[1],
                 "last_seen_at":  r[2],
                 "trigger_count": r[3],
+                "stage":         r[4],
             }
             for r in rows
         ]
@@ -3940,6 +4009,13 @@ def swing_shortlist_ui():
     .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
     .dot-green{background:#22c55e;animation:pulse 1.2s infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .stg-badge{padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block;white-space:nowrap}
+    .stg-green{background:#14532d;color:#86efac}
+    .stg-red{background:#450a0a;color:#fca5a5}
+    .stg-orange{background:#431407;color:#fb923c}
+    .stg-yellow{background:#44350a;color:#fde68a}
+    .stg-blue{background:#1e3a5f;color:#93c5fd}
+    .stg-gray{background:#1f2937;color:#6b7280}
   </style>
 </head>
 <body>
@@ -3951,6 +4027,7 @@ def swing_shortlist_ui():
   <div class="controls">
     <input type="date" id="dateInput" onchange="load()"/>
     <button class="btn btn-primary" onclick="load()">Refresh</button>
+    <button class="btn" id="runBtn" onclick="runAnalysis()" title="Run Weinstein stage analysis for today's stocks">Run Analysis</button>
     <a href="/" class="btn">← Home</a>
   </div>
 </div>
@@ -3963,6 +4040,20 @@ def swing_shortlist_ui():
 
 <script>
   const fmt = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+
+  function stageBadge(stage) {
+    if (!stage) return '<span style="color:#4b5563;font-size:.78rem">—</span>';
+    let cls = 'stg-gray';
+    if (/Stage 2|Advancing/i.test(stage))           cls = 'stg-green';
+    else if (/Stage 4|Declining/i.test(stage))       cls = 'stg-red';
+    else if (/Stage 3|Top|Distribution/i.test(stage))cls = 'stg-orange';
+    else if (/Transition/i.test(stage))              cls = 'stg-yellow';
+    else if (/Stage 1|Basing|Accumulation/i.test(stage)) cls = 'stg-blue';
+    const short = stage.replace(/Stage (\\d).*?\\(([^)]+)\\).*/, 'S$1 $2')
+                       .replace(/Stage.*?Transition.*/, 'Transition')
+                       .replace(/Insufficient data/, 'N/A');
+    return `<span class="stg-badge ${cls}" title="${stage}">${short}</span>`;
+  }
 
   function fmtTime(iso) {
     if (!iso) return '—';
@@ -4013,6 +4104,7 @@ def swing_shortlist_ui():
       rows += `<tr>
         <td><span class="sym">${s.symbol}</span></td>
         <td>${countBadge(s.trigger_count)}</td>
+        <td>${stageBadge(s.stage)}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
       </tr>`;
@@ -4020,10 +4112,25 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Stage</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+  }
+
+  async function runAnalysis() {
+    const btn = document.getElementById('runBtn');
+    btn.textContent = 'Running…';
+    btn.disabled = true;
+    try {
+      await fetch('/api/swing-shortlist/run-analysis', {method:'POST'});
+      await load();
+    } catch(e) {
+      alert('Error: ' + e.message);
+    } finally {
+      btn.textContent = 'Run Analysis';
+      btn.disabled = false;
+    }
   }
 
   // set today's date as default
