@@ -4121,27 +4121,47 @@ def api_swing_shortlist(date: Optional[str] = None):
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
-        rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, max_volume_at, buy_volume, sell_volume, snapshot_count FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
-            (target,)
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT
+                sl.symbol, sl.first_seen_at, sl.last_seen_at, sl.trigger_count,
+                sl.stage, sl.simulated, sl.status,
+                sl.avg_volume, sl.max_volume, sl.max_volume_at,
+                sl.buy_volume, sl.sell_volume, sl.snapshot_count,
+                -- snapshot with max combined pending (buy+sell)
+                (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_buy,
+                (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_sell,
+                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_at,
+                -- most recent snapshot
+                (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_buy,
+                (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_sell,
+                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_at
+            FROM swing_shortlist sl
+            WHERE sl.date=?
+            ORDER BY sl.trigger_count DESC, sl.first_seen_at ASC
+        """, (target, target, target, target, target, target, target)).fetchall()
     return {
         "date": target,
         "stocks": [
             {
-                "symbol":        r[0],
-                "first_seen_at": r[1],
-                "last_seen_at":  r[2],
-                "trigger_count": r[3],
-                "stage":         r[4],
-                "simulated":     bool(r[5]),
-                "status":        r[6],
+                "symbol":          r[0],
+                "first_seen_at":   r[1],
+                "last_seen_at":    r[2],
+                "trigger_count":   r[3],
+                "stage":           r[4],
+                "simulated":       bool(r[5]),
+                "status":          r[6],
                 "avg_volume":      r[7],
                 "max_volume":      r[8],
                 "max_volume_at":   r[9],
                 "buy_volume":      r[10],
                 "sell_volume":     r[11],
                 "snapshot_count":  r[12],
+                "max_pend_buy":    r[13],
+                "max_pend_sell":   r[14],
+                "max_pend_at":     r[15],
+                "cur_buy":         r[16],
+                "cur_sell":        r[17],
+                "cur_at":          r[18],
             }
             for r in rows
         ]
@@ -4349,8 +4369,9 @@ def swing_shortlist_ui():
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
-        <td><span class="vol-buy">▲ ${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span>${s.snapshot_count ? `<br><span class="time">${s.snapshot_count} snapshots</span>` : ''}</td>
-        <td><span class="vol-sell">▼ ${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span></td>
+        <td><span class="vol-buy">▲ ${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>${s.snapshot_count ? `<br><span class="time">${s.snapshot_count} snapshots</span>` : ''}</td>
+        <td>${s.max_pend_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.max_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.max_pend_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.max_pend_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
+        <td>${s.cur_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.cur_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.cur_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.cur_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
       </tr>`;
@@ -4358,7 +4379,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Pending Buy</th><th>Pending Sell</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Pending</th><th>Max Pending</th><th>Current</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4368,11 +4389,18 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','Pending Buy','Pending Sell','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Avg Pend Buy','Avg Pend Sell','Snapshots','Max Pend Buy','Max Pend Sell','Max Pend At','Cur Buy','Cur Sell','Cur At','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
-      s.buy_volume != null ? s.buy_volume : '',
-      s.sell_volume != null ? s.sell_volume : '',
+      s.buy_volume  != null ? Math.round(s.buy_volume)  : '',
+      s.sell_volume != null ? Math.round(s.sell_volume) : '',
+      s.snapshot_count || '',
+      s.max_pend_buy  != null ? s.max_pend_buy  : '',
+      s.max_pend_sell != null ? s.max_pend_sell : '',
+      esc(s.max_pend_at || ''),
+      s.cur_buy  != null ? s.cur_buy  : '',
+      s.cur_sell != null ? s.cur_sell : '',
+      esc(s.cur_at || ''),
       esc(s.first_seen_at || ''), esc(s.last_seen_at || ''), s.simulated ? 1 : 0
     ].join(','));
     const csv  = [header.join(','), ...rows].join('\\n');
