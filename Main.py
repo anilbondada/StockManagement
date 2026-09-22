@@ -294,6 +294,9 @@ def init_db():
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN simulated INTEGER DEFAULT 0")
         if "status" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN status TEXT")
+        for _col in ("avg_volume", "max_volume", "buy_volume", "sell_volume"):
+            if _col not in ssl_cols:
+                conn.execute(f"ALTER TABLE swing_shortlist ADD COLUMN {_col} REAL")
 
 
 
@@ -772,22 +775,41 @@ def _run_swing_shortlist_analysis():
             result = sa.get_stage(kite, sym)
             stage  = result.get("WeinsteinStage", "—") if result else "—"
 
-            # Condition check: close > open AND close > prev day close
+            # Condition check + volume data from quote
             status = None
+            avg_volume = max_volume = buy_volume = sell_volume = None
             q = quotes.get(f"NSE:{sym}")
             if q:
-                last_price   = q.get("last_price", 0)
-                daily_open   = q.get("ohlc", {}).get("open", 0)
-                prev_close   = q.get("ohlc", {}).get("close", 0)
-                cond1 = last_price > daily_open   # close > open (green candle)
-                cond2 = last_price > prev_close   # close > prev day close
-                status = "monitored" if (cond1 and cond2) else "discarded"
+                last_price        = q.get("last_price", 0)
+                daily_open        = q.get("ohlc", {}).get("open", 0)
+                prev_close        = q.get("ohlc", {}).get("close", 0)
+                cond1             = last_price > daily_open
+                cond2             = last_price > prev_close
+                status            = "monitored" if (cond1 and cond2) else "discarded"
                 print(f"[swing-scheduler] {sym}: last={last_price} open={daily_open} prev_close={prev_close} → {status}")
+
+                # Fetch last 30 × 5-min candles using instrument_token from quote
+                instrument_token = q.get("instrument_token")
+                if instrument_token:
+                    try:
+                        now_ist   = datetime.now(ist_tz)
+                        from_dt   = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
+                        candles   = kite.historical_data(instrument_token, from_dt, now_ist, "5minute")
+                        last30    = candles[-30:] if len(candles) >= 30 else candles
+                        if last30:
+                            vols      = [c["volume"] for c in last30]
+                            avg_volume  = sum(vols) / len(vols)
+                            max_volume  = max(vols)
+                            buy_volume  = sum(c["volume"] for c in last30 if c["close"] >= c["open"])
+                            sell_volume = sum(c["volume"] for c in last30 if c["close"] <  c["open"])
+                            print(f"[swing-scheduler] {sym}: avg_vol={avg_volume:.0f} max_vol={max_volume} buy={buy_volume} sell={sell_volume}")
+                    except Exception as ve:
+                        print(f"[swing-scheduler] {sym}: candle fetch error — {ve}")
 
             with _db() as conn:
                 conn.execute(
-                    "UPDATE swing_shortlist SET stage=?, status=? WHERE symbol=?",
-                    (stage, status, sym)
+                    "UPDATE swing_shortlist SET stage=?, status=?, avg_volume=?, max_volume=?, buy_volume=?, sell_volume=? WHERE symbol=?",
+                    (stage, status, avg_volume, max_volume, buy_volume, sell_volume, sym)
                 )
             print(f"[swing-scheduler] {sym}: stage={stage}")
         except Exception as e:
@@ -4040,7 +4062,7 @@ def api_swing_shortlist(date: Optional[str] = None):
     target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
     with _db() as conn:
         rows = conn.execute(
-            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
+            "SELECT symbol, first_seen_at, last_seen_at, trigger_count, stage, simulated, status, avg_volume, max_volume, buy_volume, sell_volume FROM swing_shortlist WHERE date=? ORDER BY trigger_count DESC, first_seen_at ASC",
             (target,)
         ).fetchall()
     return {
@@ -4054,6 +4076,10 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "stage":         r[4],
                 "simulated":     bool(r[5]),
                 "status":        r[6],
+                "avg_volume":    r[7],
+                "max_volume":    r[8],
+                "buy_volume":    r[9],
+                "sell_volume":   r[10],
             }
             for r in rows
         ]
@@ -4112,6 +4138,9 @@ def swing_shortlist_ui():
     .status-monitored{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-discarded{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-pending{color:#4b5563;font-size:.78rem}
+    .vol-cell{font-size:.82rem;color:#c4b5fd;font-variant-numeric:tabular-nums}
+    .vol-buy{color:#86efac;font-size:.72rem}
+    .vol-sell{color:#fca5a5;font-size:.72rem}
     .filter-tabs{display:flex;gap:8px;margin-bottom:12px}
     .tab-btn{padding:5px 16px;border-radius:6px;border:1px solid #2a2a3e;background:#0f0f1a;color:#9ca3af;cursor:pointer;font-size:.82rem;font-weight:600;transition:.15s}
     .tab-btn.active{background:#312e81;color:#a5b4fc;border-color:#4338ca}
@@ -4149,6 +4178,13 @@ def swing_shortlist_ui():
 <script>
   let _allStocks = [];
   let _activeFilter = 'all';
+
+  function fmtVol(v) {
+    if (v == null) return '<span style="color:#4b5563">—</span>';
+    if (v >= 1e6) return `<span class="vol-cell">${(v/1e6).toFixed(2)}M</span>`;
+    if (v >= 1e3) return `<span class="vol-cell">${(v/1e3).toFixed(1)}K</span>`;
+    return `<span class="vol-cell">${Math.round(v)}</span>`;
+  }
 
   function stageBadge(stage) {
     if (!stage) return '<span style="color:#4b5563;font-size:.78rem">—</span>';
@@ -4233,11 +4269,16 @@ def swing_shortlist_ui():
     let rows = '';
     stocks.forEach(s => {
       const simTag = s.simulated ? ' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;border-radius:3px;padding:1px 5px;vertical-align:middle">sim</span>' : '';
+      const buySelTag = (s.buy_volume != null)
+        ? `<br><span class="vol-buy">▲${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>`
+        : '';
       rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
+        <td>${fmtVol(s.avg_volume)}${buySelTag}</td>
+        <td>${fmtVol(s.max_volume)}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
       </tr>`;
@@ -4245,7 +4286,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol (5m×30)</th><th>Max Vol</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4255,9 +4296,13 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Avg Volume','Max Volume','Buy Volume','Sell Volume','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
+      s.avg_volume != null ? Math.round(s.avg_volume) : '',
+      s.max_volume != null ? s.max_volume : '',
+      s.buy_volume != null ? s.buy_volume : '',
+      s.sell_volume != null ? s.sell_volume : '',
       esc(s.first_seen_at || ''), esc(s.last_seen_at || ''), s.simulated ? 1 : 0
     ].join(','));
     const csv  = [header.join(','), ...rows].join('\\n');
