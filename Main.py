@@ -798,9 +798,6 @@ def _run_swing_shortlist_analysis():
                         now_ist   = datetime.now(ist_tz)
                         from_dt   = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
                         candles   = kite.historical_data(instrument_token, from_dt, now_ist, "5minute")
-                        # keep only today's candles — Kite may return previous day data if today has none
-                        today_str = now_ist.strftime("%Y-%m-%d")
-                        candles   = [c for c in candles if str(c["date"]).startswith(today_str)]
                         # need at least 2 candles to compute deltas; take 31 to get 30 deltas
                         raw       = candles[-(31):] if len(candles) >= 31 else candles
                         if len(raw) >= 2:
@@ -4235,6 +4232,19 @@ def swing_shortlist_ui():
     } catch { return iso.slice(11,16); }
   }
 
+  function fmtVolTime(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      const ist = new Date(new Date().toLocaleString('en-US', {timeZone:'Asia/Kolkata'}));
+      const isToday = d.toLocaleDateString('en-IN', {timeZone:'Asia/Kolkata'}) === ist.toLocaleDateString('en-IN', {timeZone:'Asia/Kolkata'});
+      const time = d.toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', hour12:true, timeZone:'Asia/Kolkata'});
+      if (isToday) return time;
+      const date = d.toLocaleDateString('en-IN', {day:'numeric', month:'short', timeZone:'Asia/Kolkata'});
+      return `${date} ${time}`;
+    } catch { return iso.slice(0,16); }
+  }
+
   function countBadge(n) {
     const cls = n === 1 ? 'count-1' : n === 2 ? 'count-2' : n === 3 ? 'count-3' : 'count-hi';
     return `<span class="count-badge ${cls}">${n}</span>`;
@@ -4300,7 +4310,7 @@ def swing_shortlist_ui():
         <td>${statusBadge(s.status)}</td>
         <td>${stageBadge(s.stage)}</td>
         <td>${fmtVol(s.avg_volume)}</td>
-        <td>${fmtVol(s.max_volume)}${s.max_volume_at ? `<br><span class="time">${fmtTime(s.max_volume_at)}</span>` : ''}</td>
+        <td>${fmtVol(s.max_volume)}${s.max_volume_at ? `<br><span class="time">${fmtVolTime(s.max_volume_at)}</span>` : ''}</td>
         <td>${buySellCell}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
         <td><span class="time">${fmtTime(s.last_seen_at)}</span></td>
