@@ -805,11 +805,12 @@ def _run_swing_shortlist_analysis():
                             paired = list(zip(deltas, raw[1:]))
                             avg_volume  = sum(deltas) / len(deltas)
                             max_volume  = max(deltas)
-                            buy_volume  = sum(d for d, c in paired if c["close"] >= c["open"])
-                            sell_volume = sum(d for d, c in paired if c["close"] <  c["open"])
-                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume} buy={buy_volume} sell={sell_volume}")
+                            buy_dels    = [d for d, c in paired if c["close"] >= c["open"]]
+                            sell_dels   = [d for d, c in paired if c["close"] <  c["open"]]
+                            buy_volume  = sum(buy_dels)  / len(buy_dels)  if buy_dels  else 0
+                            sell_volume = sum(sell_dels) / len(sell_dels) if sell_dels else 0
+                            print(f"[swing-scheduler] {sym}: candles={len(raw)} avg_vol={avg_volume:.0f} max_vol={max_volume} avg_buy={buy_volume:.0f} avg_sell={sell_volume:.0f}")
                         elif len(raw) == 1:
-                            # only one candle returned — use its volume directly (first candle of day)
                             avg_volume  = raw[0]["volume"]
                             max_volume  = raw[0]["volume"]
                             buy_volume  = raw[0]["volume"] if raw[0]["close"] >= raw[0]["open"] else 0
@@ -4283,6 +4284,7 @@ def swing_shortlist_ui():
       const buySellCell = (s.buy_volume != null)
         ? `<span class="vol-buy">▲${fmtVol(s.buy_volume).replace(/<[^>]*>/g,'')}</span>&nbsp;<span class="vol-sell">▼${fmtVol(s.sell_volume).replace(/<[^>]*>/g,'')}</span>`
         : '<span style="color:#4b5563">—</span>';
+      // buy_volume and sell_volume now store per-candle averages (avg of bullish / avg of bearish candles)
       rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
@@ -4298,7 +4300,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol</th><th>Buy / Sell Vol</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Vol</th><th>Max Vol</th><th>Avg Buy / Avg Sell</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4308,7 +4310,7 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','Avg Vol (per candle)','Max Vol (per candle)','Buy Vol (total)','Sell Vol (total)','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Avg Vol','Max Vol','Avg Buy Vol','Avg Sell Vol','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
       s.avg_volume != null ? Math.round(s.avg_volume) : '',
