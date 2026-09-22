@@ -798,6 +798,9 @@ def _run_swing_shortlist_analysis():
                         now_ist   = datetime.now(ist_tz)
                         from_dt   = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
                         candles   = kite.historical_data(instrument_token, from_dt, now_ist, "5minute")
+                        # keep only today's candles (Kite may include previous day data)
+                        today_str = now_ist.strftime("%Y-%m-%d")
+                        candles   = [c for c in candles if str(c["date"]).startswith(today_str)]
                         # need at least 2 candles to compute deltas; take 31 to get 30 deltas
                         raw       = candles[-(31):] if len(candles) >= 31 else candles
                         if len(raw) >= 2:
