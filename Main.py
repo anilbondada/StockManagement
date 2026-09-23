@@ -303,6 +303,8 @@ def init_db():
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN snapshot_count INTEGER")
         if "max_volume_at" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN max_volume_at TEXT")
+        if "monitor_start_date" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN monitor_start_date TEXT")
         # Order book snapshots — collected every 5 min during market hours
         conn.execute("""
             CREATE TABLE IF NOT EXISTS swing_shortlist_orders (
@@ -4112,23 +4114,31 @@ async def swingtrade_shortlist_webhook(payload: dict):
     symbols   = [s.strip() for s in payload.get("stocks", "").split(",") if s.strip()]
     simulated = 1 if payload.get("_simulate") else 0
 
+    next_day = (now_ist + timedelta(days=1)).strftime("%Y-%m-%d")
     upserted = []
     with _db() as conn:
         for sym in symbols:
             existing = conn.execute(
-                "SELECT id, trigger_count FROM swing_shortlist WHERE symbol=?",
+                "SELECT id, trigger_count, monitor_start_date FROM swing_shortlist WHERE symbol=?",
                 (sym,)
             ).fetchone()
             if existing:
-                conn.execute(
-                    "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=? WHERE id=?",
-                    (now_str, today, simulated, existing[0])
-                )
+                # Only set monitor_start_date if it hasn't been set yet
+                if existing[2] is None:
+                    conn.execute(
+                        "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=?, monitor_start_date=? WHERE id=?",
+                        (now_str, today, simulated, next_day, existing[0])
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=? WHERE id=?",
+                        (now_str, today, simulated, existing[0])
+                    )
                 upserted.append({"symbol": sym, "action": "updated", "count": existing[1] + 1})
             else:
                 conn.execute(
-                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date, simulated) VALUES (?,?,?,1,?,?)",
-                    (sym, now_str, now_str, today, simulated)
+                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date, simulated, monitor_start_date) VALUES (?,?,?,1,?,?,?)",
+                    (sym, now_str, now_str, today, simulated, next_day)
                 )
                 upserted.append({"symbol": sym, "action": "inserted", "count": 1})
 
@@ -4196,7 +4206,7 @@ def api_swing_shortlist(date: Optional[str] = None):
         rows = conn.execute("""
             SELECT
                 sl.symbol, sl.first_seen_at, sl.last_seen_at, sl.trigger_count,
-                sl.stage, sl.simulated, sl.status,
+                sl.stage, sl.simulated, sl.status, sl.monitor_start_date,
                 sl.avg_volume, sl.max_volume, sl.max_volume_at, sl.snapshot_count,
                 -- avg pending: live from all snapshots today
                 (SELECT AVG(buy_quantity)  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as avg_pend_buy,
@@ -4223,22 +4233,23 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "first_seen_at":   r[1],
                 "last_seen_at":    r[2],
                 "trigger_count":   r[3],
-                "stage":           r[4],
-                "simulated":       bool(r[5]),
-                "status":          r[6],
-                "avg_volume":      r[7],
-                "max_volume":      r[8],
-                "max_volume_at":   r[9],
-                "snapshot_count":  r[10],
-                "avg_pend_buy":    r[11],
-                "avg_pend_sell":   r[12],
-                "pend_count":      r[13],
-                "max_pend_buy":    r[14],
-                "max_pend_sell":   r[15],
-                "max_pend_at":     r[16],
-                "cur_buy":         r[17],
-                "cur_sell":        r[18],
-                "cur_at":          r[19],
+                "stage":               r[4],
+                "simulated":           bool(r[5]),
+                "status":              r[6],
+                "monitor_start_date":  r[7],
+                "avg_volume":          r[8],
+                "max_volume":          r[9],
+                "max_volume_at":       r[10],
+                "snapshot_count":      r[11],
+                "avg_pend_buy":        r[12],
+                "avg_pend_sell":       r[13],
+                "pend_count":          r[14],
+                "max_pend_buy":        r[15],
+                "max_pend_sell":       r[16],
+                "max_pend_at":         r[17],
+                "cur_buy":             r[18],
+                "cur_sell":            r[19],
+                "cur_at":              r[20],
             }
             for r in rows
         ]
@@ -4491,6 +4502,7 @@ def swing_shortlist_ui():
         <td>${countBadge(s.trigger_count)}</td>
         <td>${statusBadge(s.status, s.symbol, s.date)}</td>
         <td>${stageBadge(s.stage)}</td>
+        <td><span class="time">${s.monitor_start_date || '—'}</span></td>
         <td><span class="vol-buy">▲ ${fmtVol(s.avg_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.avg_pend_sell).replace(/<[^>]*>/g,'')}</span>${s.pend_count ? `<br><span class="time">${s.pend_count} snapshots</span>` : ''}</td>
         <td>${s.max_pend_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.max_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.max_pend_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.max_pend_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
         <td>${s.cur_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.cur_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.cur_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.cur_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
@@ -4501,7 +4513,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Avg Pending</th><th>Max Pending</th><th>Current</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Monitor Start</th><th>Avg Pending</th><th>Max Pending</th><th>Current</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
