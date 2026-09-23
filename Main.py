@@ -17,8 +17,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Header, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from kiteconnect import KiteConnect, KiteTicker
 import pandas as pd
 
@@ -74,6 +74,7 @@ manager       = ConnectionManager()
 order_manager = ConnectionManager()
 _main_loop    = None
 _ticker       = None
+_ssl_sse_clients: list = []   # asyncio.Queue per connected swing-shortlist SSE client
 
 
 # ── KiteTicker (real-time order updates) ──────────────────────────────────────
@@ -851,8 +852,9 @@ async def _swing_shortlist_scheduler():
         await asyncio.sleep((next_day - now3).total_seconds())
 
 
-def _fetch_swing_orders():
-    """Pull buy_quantity & sell_quantity from kite.quote() for today's shortlist and store a snapshot."""
+def _fetch_swing_orders() -> list:
+    """Pull buy_quantity & sell_quantity from kite.quote() for today's shortlist and store a snapshot.
+    Returns list of {symbol, buy, sell, at} dicts for any symbol that set a new day-max this snapshot."""
     ist_tz  = timezone(timedelta(hours=5, minutes=30))
     now_ist = datetime.now(ist_tz)
     today   = now_ist.strftime("%Y-%m-%d")
@@ -861,41 +863,58 @@ def _fetch_swing_orders():
         kite = get_kite()
     except Exception as e:
         print(f"[swing-orders] Kite not available: {e}")
-        return
+        return []
     with _db() as conn:
         rows = conn.execute("SELECT symbol FROM swing_shortlist WHERE date=?", (today,)).fetchall()
     symbols = [r[0] for r in rows]
     if not symbols:
-        return
+        return []
     quote_keys = [f"NSE:{s}" for s in symbols]
     try:
         quotes = kite.quote(quote_keys)
     except Exception as e:
         print(f"[swing-orders] Quote batch failed: {e}")
-        return
+        return []
+    max_events = []
     with _db() as conn:
         for sym in symbols:
             q = quotes.get(f"NSE:{sym}")
-            if q:
-                conn.execute(
-                    "INSERT INTO swing_shortlist_orders (symbol, date, timestamp, buy_quantity, sell_quantity) VALUES (?,?,?,?,?)",
-                    (sym, today, ts, q.get("buy_quantity"), q.get("sell_quantity"))
-                )
+            if not q:
+                continue
+            new_buy  = q.get("buy_quantity")  or 0
+            new_sell = q.get("sell_quantity") or 0
+            new_combined = new_buy + new_sell
+            prev = conn.execute(
+                "SELECT MAX(buy_quantity + sell_quantity) FROM swing_shortlist_orders WHERE symbol=? AND date=?",
+                (sym, today)
+            ).fetchone()
+            prev_max = prev[0] if prev and prev[0] is not None else 0
+            conn.execute(
+                "INSERT INTO swing_shortlist_orders (symbol, date, timestamp, buy_quantity, sell_quantity) VALUES (?,?,?,?,?)",
+                (sym, today, ts, new_buy, new_sell)
+            )
+            if new_combined > prev_max:
+                max_events.append({"type": "max_pending", "symbol": sym, "buy": new_buy, "sell": new_sell, "at": ts})
     print(f"[swing-orders] Snapshot saved for {len(symbols)} symbols at {ts}")
+    return max_events
 
 
 async def _swing_orders_scheduler():
     """Every 5 min on weekdays during market hours (9:15 AM – 3:30 PM IST), snapshot order book quantities."""
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     while True:
-        await asyncio.sleep(5 * 60)   # wait 5 minutes between each run
+        await asyncio.sleep(5 * 60)
         now = datetime.now(ist_tz)
-        if now.weekday() < 5:         # Mon–Fri only
+        if now.weekday() < 5:
             market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
             market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
             if market_open <= now <= market_close:
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _fetch_swing_orders)
+                max_events = await loop.run_in_executor(None, _fetch_swing_orders)
+                if max_events and _ssl_sse_clients:
+                    msg = "data: " + json.dumps(max_events) + "\n\n"
+                    for q in list(_ssl_sse_clients):
+                        await q.put(msg)
 
 
 async def lifespan(_: FastAPI):
@@ -4108,6 +4127,30 @@ async def swingtrade_shortlist_webhook(payload: dict):
     return {"received": True, "date": today, "symbols": upserted}
 
 
+@app.get("/api/swing-shortlist/stream")
+async def swing_shortlist_stream(request: Request):
+    """SSE stream — pushes max_pending events to connected clients."""
+    queue: asyncio.Queue = asyncio.Queue()
+    _ssl_sse_clients.append(queue)
+    async def event_gen():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            try:
+                _ssl_sse_clients.remove(queue)
+            except ValueError:
+                pass
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.post("/api/swing-shortlist/run-analysis")
 async def api_run_swing_analysis():
     """Manually trigger stage analysis for today's shortlist."""
@@ -4266,7 +4309,6 @@ def swing_shortlist_ui():
   let _activeFilter = 'all';
   let _knownSymbols = null;   // null = first load, Set after that
   let _prevCounts = {};
-  let _maxPendNotified = {};  // symbol -> cur_at timestamp when max-pending notif was last sent
 
   // Request notification permission once
   if ('Notification' in window && Notification.permission === 'default') {
@@ -4277,6 +4319,21 @@ def swing_shortlist_ui():
       new Notification(title, { body });
     }
   }
+
+  // SSE — fires notification immediately when server detects a new day-max snapshot
+  const _sslStream = new EventSource('/api/swing-shortlist/stream');
+  _sslStream.onmessage = (e) => {
+    try {
+      const events = JSON.parse(e.data);
+      events.forEach(ev => {
+        if (ev.type === 'max_pending') {
+          const buy  = ev.buy  >= 1e6 ? (ev.buy/1e6).toFixed(2)+'M'  : ev.buy  >= 1e3 ? (ev.buy/1e3).toFixed(1)+'K'  : ev.buy;
+          const sell = ev.sell >= 1e6 ? (ev.sell/1e6).toFixed(2)+'M' : ev.sell >= 1e3 ? (ev.sell/1e3).toFixed(1)+'K' : ev.sell;
+          notify('Swing Shortlist — Max Pending', `${ev.symbol}  ▲${buy}  ▼${sell}`);
+        }
+      });
+    } catch {}
+  };
 
   function fmtVol(v) {
     if (v == null) return '<span style="color:#4b5563">—</span>';
@@ -4371,18 +4428,6 @@ def swing_shortlist_ui():
                  retriggered.map(s => `${s.symbol} (${s.trigger_count}×)`).join(', '));
         }
       }
-      // Notify when current snapshot is also the day's max pending
-      const atMaxPending = _allStocks.filter(s =>
-        s.cur_at && s.max_pend_at && s.cur_at === s.max_pend_at &&
-        s.pend_count > 1 &&
-        _maxPendNotified[s.symbol] !== s.cur_at
-      );
-      if (atMaxPending.length > 0) {
-        atMaxPending.forEach(s => { _maxPendNotified[s.symbol] = s.cur_at; });
-        notify('Swing Shortlist — Max Pending',
-               atMaxPending.map(s => `${s.symbol} ▲${fmtVol(s.cur_buy).replace(/<[^>]*>/g,'')} ▼${fmtVol(s.cur_sell).replace(/<[^>]*>/g,'')}`).join('\n'));
-      }
-
       _knownSymbols = incoming;
       _prevCounts   = Object.fromEntries(_allStocks.map(s => [s.symbol, s.trigger_count]));
 
