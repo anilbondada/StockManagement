@@ -910,12 +910,20 @@ def _fetch_swing_orders() -> list:
                 (sym, today)
             ).fetchone()
             prev_max = prev[0] if prev and prev[0] is not None else 0
+            avg_row = conn.execute(
+                """SELECT AVG(buy_quantity + sell_quantity)
+                   FROM (SELECT buy_quantity, sell_quantity FROM swing_shortlist_orders
+                         WHERE symbol=? AND date=? ORDER BY timestamp DESC LIMIT 30)""",
+                (sym, today)
+            ).fetchone()
+            avg_combined = avg_row[0] if avg_row and avg_row[0] is not None else 0
             conn.execute(
                 "INSERT INTO swing_shortlist_orders (symbol, date, timestamp, buy_quantity, sell_quantity) VALUES (?,?,?,?,?)",
                 (sym, today, ts, new_buy, new_sell)
             )
             if new_combined > prev_max:
-                max_events.append({"type": "max_pending", "symbol": sym, "buy": new_buy, "sell": new_sell, "at": ts})
+                event_type = "vol_surge" if avg_combined > 0 and new_combined >= 2 * avg_combined else "max_pending"
+                max_events.append({"type": event_type, "symbol": sym, "buy": new_buy, "sell": new_sell, "at": ts})
     print(f"[swing-orders] Snapshot saved for {len(symbols)} symbols at {ts}")
     return max_events
 
@@ -4389,11 +4397,15 @@ def swing_shortlist_ui():
     try {
       const events = JSON.parse(e.data);
       events.forEach(ev => {
-        if (ev.type === 'max_pending') {
+        if (ev.type === 'max_pending' || ev.type === 'vol_surge') {
           const key = `${ev.symbol}|${ev.at}`;
           if (_seenMaxEvents.has(key)) return;
           _seenMaxEvents.add(key);
-          // notification placeholder — add notify() call here when ready
+          if (ev.type === 'vol_surge') {
+            const buy  = ev.buy  >= 1e6 ? (ev.buy/1e6).toFixed(2)+'M'  : ev.buy  >= 1e3 ? (ev.buy/1e3).toFixed(1)+'K'  : ev.buy;
+            const sell = ev.sell >= 1e6 ? (ev.sell/1e6).toFixed(2)+'M' : ev.sell >= 1e3 ? (ev.sell/1e3).toFixed(1)+'K' : ev.sell;
+            notify(`${ev.symbol} — Volume Surge`, `Pending at 2× avg  ▲${buy}  ▼${sell}`);
+          }
         }
       });
     } catch {}
