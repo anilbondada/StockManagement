@@ -813,7 +813,9 @@ def _run_swing_shortlist_analysis():
                 # Avg pending order quantities from 5-min snapshots collected throughout the day
                 with _db() as conn2:
                     row = conn2.execute(
-                        "SELECT AVG(buy_quantity), AVG(sell_quantity), COUNT(*) FROM swing_shortlist_orders WHERE symbol=? AND date=?",
+                        """SELECT AVG(buy_quantity), AVG(sell_quantity), COUNT(*)
+                           FROM (SELECT buy_quantity, sell_quantity FROM swing_shortlist_orders
+                                 WHERE symbol=? AND date=? ORDER BY timestamp DESC LIMIT 30)""",
                         (sym, today)
                     ).fetchone()
                 buy_volume     = row[0] if row and row[0] is not None else None
@@ -4225,9 +4227,9 @@ def api_swing_shortlist(date: Optional[str] = None):
                 sl.stage, sl.simulated, sl.status, sl.monitor_start_date,
                 sl.avg_volume, sl.max_volume, sl.max_volume_at, sl.snapshot_count,
                 -- avg pending: live from all snapshots today
-                (SELECT AVG(buy_quantity)  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as avg_pend_buy,
-                (SELECT AVG(sell_quantity) FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as avg_pend_sell,
-                (SELECT COUNT(*)           FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as pend_count,
+                (SELECT AVG(buy_quantity)  FROM (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_pend_buy,
+                (SELECT AVG(sell_quantity) FROM (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_pend_sell,
+                (SELECT COUNT(*)           FROM (SELECT id            FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as pend_count,
                 -- snapshot with max combined pending (buy+sell)
                 (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_buy,
                 (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_sell,
