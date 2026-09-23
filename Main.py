@@ -862,6 +862,16 @@ def _fetch_swing_orders() -> list:
     now_ist = datetime.now(ist_tz)
     today   = now_ist.strftime("%Y-%m-%d")
     ts      = now_ist.isoformat()
+    # Expire any monitored stocks whose 30-day window has passed
+    with _db() as conn:
+        expired = conn.execute("""
+            UPDATE swing_shortlist SET status='expired'
+            WHERE status='monitored'
+              AND monitor_start_date IS NOT NULL
+              AND ? >= date(monitor_start_date, '+30 days')
+        """, (today,)).rowcount
+    if expired:
+        print(f"[swing-orders] Expired {expired} stock(s)")
     try:
         kite = get_kite()
     except Exception as e:
@@ -4314,6 +4324,7 @@ def swing_shortlist_ui():
     .status-monitored{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-discarded{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-pending{color:#4b5563;font-size:.78rem}
+    .status-expired{background:#1c1917;color:#a8a29e;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .btn-discard{margin-left:6px;padding:1px 7px;border-radius:999px;border:1px solid #7f1d1d;background:transparent;color:#fca5a5;font-size:.68rem;font-weight:700;cursor:pointer;line-height:1.4;vertical-align:middle}
     .btn-discard:hover{background:#450a0a}
     .vol-cell{font-size:.82rem;color:#c4b5fd;font-variant-numeric:tabular-nums}
@@ -4410,6 +4421,7 @@ def swing_shortlist_ui():
   function statusBadge(status, symbol, date) {
     if (!status) return '<span class="status-pending">—</span>';
     if (status === 'monitored') return `<span class="status-monitored">✓ Monitored</span><button class="btn-discard" onclick="discardStock('${symbol}','${date}')">Discard</button>`;
+    if (status === 'expired')   return '<span class="status-expired">⏱ Expired</span>';
     return '<span class="status-discarded">✗ Discarded</span>';
   }
 
