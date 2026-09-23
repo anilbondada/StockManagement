@@ -4927,7 +4927,7 @@ tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#37415
       <div class="hint">Press <strong>Enter</strong> or <strong>comma</strong> to add · click × to remove</div>
     </div>
 
-    <div class="field" style="justify-content:flex-end;padding-bottom:20px;gap:8px;flex-wrap:wrap">
+    <div style="display:flex;flex-direction:row;align-items:flex-end;gap:8px;flex-wrap:wrap;padding-bottom:20px">
       <input type="file" id="csvInput" accept=".csv,.txt" onchange="loadCSV(event)"/>
       <button class="btn btn-outline" onclick="document.getElementById('csvInput').click()">Upload CSV</button>
       <button class="btn btn-primary" id="runBtn" onclick="runAnalysis()" disabled>Run Analysis</button>
