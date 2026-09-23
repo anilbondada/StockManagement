@@ -901,10 +901,14 @@ def _fetch_swing_orders() -> list:
 
 
 async def _swing_orders_scheduler():
-    """Every 5 min on weekdays during market hours (9:15 AM – 3:30 PM IST), snapshot order book quantities."""
+    """Runs at each clock-aligned 5-min boundary (:00,:05,…,:55 IST) on weekdays during market hours."""
     ist_tz = timezone(timedelta(hours=5, minutes=30))
     while True:
-        await asyncio.sleep(5 * 60)
+        # Sleep until the next minute that is divisible by 5 (clock-aligned)
+        now = datetime.now(ist_tz)
+        secs_past = (now.minute % 5) * 60 + now.second + now.microsecond / 1e6
+        secs_to_sleep = (5 * 60 - secs_past) if secs_past > 0 else (5 * 60)
+        await asyncio.sleep(secs_to_sleep)
         now = datetime.now(ist_tz)
         if now.weekday() < 5:
             market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
