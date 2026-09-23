@@ -4908,7 +4908,16 @@ tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#37415
 <!-- Input panel -->
 <div class="panel">
   <div class="panel-title">Symbols &amp; Date</div>
-  <div class="row">
+
+  <div style="display:flex;justify-content:center;margin-bottom:16px">
+    <div class="field" style="min-width:200px;max-width:280px">
+      <label>Shortlist / Scanner Date</label>
+      <input type="date" id="dateInput" title="Leave blank to use today's date"/>
+      <div class="hint">Optional — defaults to today</div>
+    </div>
+  </div>
+
+  <div class="row" style="align-items:flex-end">
     <div class="field" style="flex:1;min-width:280px">
       <label>Symbols</label>
       <div class="tag-wrap" id="tagWrap" onclick="document.getElementById('symInput').focus()">
@@ -4918,18 +4927,9 @@ tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#37415
       <div class="hint">Press <strong>Enter</strong> or <strong>comma</strong> to add · click × to remove</div>
     </div>
 
-    <div class="field">
-      <label>Shortlist / Scanner Date</label>
-      <input type="date" id="dateInput" title="Leave blank to use today's date"/>
-      <div class="hint">Optional — defaults to today</div>
-    </div>
-
-    <div class="field" style="justify-content:flex-end;padding-bottom:20px">
+    <div class="field" style="justify-content:flex-end;padding-bottom:20px;gap:8px;flex-wrap:wrap">
       <input type="file" id="csvInput" accept=".csv,.txt" onchange="loadCSV(event)"/>
       <button class="btn btn-outline" onclick="document.getElementById('csvInput').click()">Upload CSV</button>
-    </div>
-
-    <div class="field" style="justify-content:flex-end;padding-bottom:20px;gap:8px">
       <button class="btn btn-primary" id="runBtn" onclick="runAnalysis()" disabled>Run Analysis</button>
       <button class="btn btn-outline" id="addShortlistBtn" onclick="addToShortlist()" disabled>Add to Shortlist</button>
     </div>
