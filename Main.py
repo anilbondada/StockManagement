@@ -4346,9 +4346,7 @@ def swing_shortlist_ui():
           const key = `${ev.symbol}|${ev.at}`;
           if (_seenMaxEvents.has(key)) return;
           _seenMaxEvents.add(key);
-          const buy  = ev.buy  >= 1e6 ? (ev.buy/1e6).toFixed(2)+'M'  : ev.buy  >= 1e3 ? (ev.buy/1e3).toFixed(1)+'K'  : ev.buy;
-          const sell = ev.sell >= 1e6 ? (ev.sell/1e6).toFixed(2)+'M' : ev.sell >= 1e3 ? (ev.sell/1e3).toFixed(1)+'K' : ev.sell;
-          notify('Swing Shortlist — Max Pending', `${ev.symbol}  ▲${buy}  ▼${sell}`);
+          // notification placeholder — add notify() call here when ready
         }
       });
     } catch {}
@@ -4427,26 +4425,7 @@ def swing_shortlist_ui():
       const data = await fetch(url).then(r => r.json());
       _allStocks = data.stocks || [];
 
-      // Detect new symbols since last refresh and notify
       const incoming = new Set(_allStocks.map(s => s.symbol));
-      if (_knownSymbols !== null) {
-        const newSyms = [...incoming].filter(s => !_knownSymbols.has(s));
-        if (newSyms.length > 0) {
-          notify('Swing Shortlist — New Stock' + (newSyms.length > 1 ? 's' : ''),
-                 newSyms.join(', ') + ' added');
-        }
-        // Also notify if trigger count increased for an existing symbol
-        const retriggered = _allStocks
-          .filter(s => _knownSymbols.has(s.symbol) && s.trigger_count > 1)
-          .filter(s => {
-            const prev = _prevCounts[s.symbol];
-            return prev !== undefined && s.trigger_count > prev;
-          });
-        if (retriggered.length > 0) {
-          notify('Swing Shortlist — Re-triggered',
-                 retriggered.map(s => `${s.symbol} (${s.trigger_count}×)`).join(', '));
-        }
-      }
       _knownSymbols = incoming;
       _prevCounts   = Object.fromEntries(_allStocks.map(s => [s.symbol, s.trigger_count]));
 
