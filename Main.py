@@ -4224,6 +4224,51 @@ async def api_discard_stock(payload: dict):
     return {"status": "discarded", "symbol": symbol}
 
 
+@app.post("/api/swing-shortlist/from-analysis")
+async def api_add_from_analysis(payload: dict):
+    symbols_in = payload.get("symbols", [])
+    date_str   = payload.get("date", "").strip()
+    if not date_str or not symbols_in:
+        raise HTTPException(status_code=400, detail="symbols and date required")
+    try:
+        analysis_date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid date format, expected YYYY-MM-DD")
+    ist_tz  = timezone(timedelta(hours=5, minutes=30))
+    now_str = datetime.now(ist_tz).isoformat()
+    next_day = (analysis_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    upserted = []
+    with _db() as conn:
+        for sym in symbols_in:
+            sym = sym.strip().upper()
+            if not sym:
+                continue
+            existing = conn.execute(
+                "SELECT id, trigger_count, monitor_start_date FROM swing_shortlist WHERE symbol=?",
+                (sym,)
+            ).fetchone()
+            if existing:
+                if existing[2] is None:
+                    conn.execute(
+                        "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=0, status='monitored', monitor_start_date=? WHERE id=?",
+                        (now_str, date_str, next_day, existing[0])
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=0, status='monitored' WHERE id=?",
+                        (now_str, date_str, existing[0])
+                    )
+                upserted.append({"symbol": sym, "action": "updated"})
+            else:
+                conn.execute(
+                    "INSERT INTO swing_shortlist (symbol, first_seen_at, last_seen_at, trigger_count, date, simulated, status, monitor_start_date) VALUES (?,?,?,1,?,0,'monitored',?)",
+                    (sym, now_str, now_str, date_str, next_day)
+                )
+                upserted.append({"symbol": sym, "action": "inserted"})
+    print(f"[from-analysis] Added {len(upserted)} symbols for {date_str}, monitor_start_date={next_day}")
+    return {"added": len(upserted), "symbols": upserted}
+
+
 @app.get("/api/swing-shortlist")
 def api_swing_shortlist(date: Optional[str] = None):
     ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -4883,8 +4928,9 @@ tbody td{padding:10px 14px;vertical-align:middle;white-space:nowrap;color:#37415
       <button class="btn btn-outline" onclick="document.getElementById('csvInput').click()">Upload CSV</button>
     </div>
 
-    <div class="field" style="justify-content:flex-end;padding-bottom:20px">
+    <div class="field" style="justify-content:flex-end;padding-bottom:20px;gap:8px">
       <button class="btn btn-primary" id="runBtn" onclick="runAnalysis()" disabled>Run Analysis</button>
+      <button class="btn btn-outline" id="addShortlistBtn" onclick="addToShortlist()" disabled>Add to Shortlist</button>
     </div>
   </div>
 
@@ -4998,6 +5044,9 @@ async function runAnalysis() {
   if (!symbols.length) return;
   const dateVal = document.getElementById('dateInput').value || null;
   document.getElementById('runBtn').disabled = true;
+  const addBtn = document.getElementById('addShortlistBtn');
+  addBtn.disabled = true;
+  addBtn.textContent = 'Add to Shortlist';
   const pw = document.getElementById('progressWrap');
   pw.style.display = 'flex';
   document.getElementById('progressText').textContent =
@@ -5020,12 +5069,45 @@ async function runAnalysis() {
     }
     allResults = await res.json();
     renderResults(allResults);
+    document.getElementById('addShortlistBtn').disabled = false;
   } catch(err) {
     document.getElementById('resultsSection').innerHTML =
       '<div class="panel" style="color:#dc2626">Error: ' + err.message + '</div>';
   } finally {
     pw.style.display = 'none';
     document.getElementById('runBtn').disabled = false;
+  }
+}
+
+// ── Add to Shortlist ───────────────────────────────────────────────────────
+async function addToShortlist() {
+  if (!allResults || !allResults.length) return;
+  const dateVal = document.getElementById('dateInput').value || '';
+  if (!dateVal) { alert('No date selected.'); return; }
+  const syms = allResults.filter(r => !r.Error).map(r => r.Symbol).filter(Boolean);
+  if (!syms.length) { alert('No valid symbols to add.'); return; }
+  const btn = document.getElementById('addShortlistBtn');
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  try {
+    const res = await fetch('/api/swing-shortlist/from-analysis', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ symbols: syms, date: dateVal })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({detail: res.statusText}));
+      alert('Error: ' + (err.detail || res.statusText));
+      btn.disabled = false;
+      btn.textContent = 'Add to Shortlist';
+      return;
+    }
+    const data = await res.json();
+    btn.textContent = 'Added ' + data.added;
+  } catch(e) {
+    alert('Network error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Add to Shortlist';
   }
 }
 
