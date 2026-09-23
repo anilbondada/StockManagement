@@ -4174,6 +4174,20 @@ async def api_run_swing_analysis():
     return {"status": "done"}
 
 
+@app.post("/api/swing-shortlist/discard")
+async def api_discard_stock(payload: dict):
+    symbol = payload.get("symbol", "").strip()
+    date   = payload.get("date", "").strip()
+    if not symbol or not date:
+        raise HTTPException(status_code=400, detail="symbol and date required")
+    with _db() as conn:
+        conn.execute(
+            "UPDATE swing_shortlist SET status='discarded' WHERE symbol=? AND date=?",
+            (symbol, date)
+        )
+    return {"status": "discarded", "symbol": symbol}
+
+
 @app.get("/api/swing-shortlist")
 def api_swing_shortlist(date: Optional[str] = None):
     ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -4205,6 +4219,7 @@ def api_swing_shortlist(date: Optional[str] = None):
         "stocks": [
             {
                 "symbol":          r[0],
+                "date":            target,
                 "first_seen_at":   r[1],
                 "last_seen_at":    r[2],
                 "trigger_count":   r[3],
@@ -4282,6 +4297,8 @@ def swing_shortlist_ui():
     .status-monitored{background:#14532d;color:#86efac;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-discarded{background:#450a0a;color:#fca5a5;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block}
     .status-pending{color:#4b5563;font-size:.78rem}
+    .btn-discard{margin-left:6px;padding:1px 7px;border-radius:999px;border:1px solid #7f1d1d;background:transparent;color:#fca5a5;font-size:.68rem;font-weight:700;cursor:pointer;line-height:1.4;vertical-align:middle}
+    .btn-discard:hover{background:#450a0a}
     .vol-cell{font-size:.82rem;color:#c4b5fd;font-variant-numeric:tabular-nums}
     .vol-buy{color:#86efac;font-size:.72rem}
     .vol-sell{color:#fca5a5;font-size:.72rem}
@@ -4373,10 +4390,19 @@ def swing_shortlist_ui():
     return `<span class="stg-badge ${cls}" title="${stage}">${short}</span>`;
   }
 
-  function statusBadge(status) {
+  function statusBadge(status, symbol, date) {
     if (!status) return '<span class="status-pending">—</span>';
-    if (status === 'monitored') return '<span class="status-monitored">✓ Monitored</span>';
+    if (status === 'monitored') return `<span class="status-monitored">✓ Monitored</span><button class="btn-discard" onclick="discardStock('${symbol}','${date}')">Discard</button>`;
     return '<span class="status-discarded">✗ Discarded</span>';
+  }
+
+  async function discardStock(symbol, date) {
+    await fetch('/api/swing-shortlist/discard', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol, date})
+    });
+    load();
   }
 
   function fmtTime(iso) {
@@ -4463,7 +4489,7 @@ def swing_shortlist_ui():
       rows += `<tr data-status="${s.status || ''}">
         <td><span class="sym">${s.symbol}</span>${simTag}</td>
         <td>${countBadge(s.trigger_count)}</td>
-        <td>${statusBadge(s.status)}</td>
+        <td>${statusBadge(s.status, s.symbol, s.date)}</td>
         <td>${stageBadge(s.stage)}</td>
         <td><span class="vol-buy">▲ ${fmtVol(s.avg_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.avg_pend_sell).replace(/<[^>]*>/g,'')}</span>${s.pend_count ? `<br><span class="time">${s.pend_count} snapshots</span>` : ''}</td>
         <td>${s.max_pend_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.max_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.max_pend_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.max_pend_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
