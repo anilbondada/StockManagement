@@ -74,7 +74,8 @@ manager       = ConnectionManager()
 order_manager = ConnectionManager()
 _main_loop    = None
 _ticker       = None
-_ssl_sse_clients: list = []   # asyncio.Queue per connected swing-shortlist SSE client
+_ssl_sse_clients: list = []         # asyncio.Queue per connected SSE client
+_ssl_recent_events: list  = []      # last 10 max_pending events (replay to reconnecting clients)
 
 
 # ── KiteTicker (real-time order updates) ──────────────────────────────────────
@@ -911,8 +912,12 @@ async def _swing_orders_scheduler():
             if market_open <= now <= market_close:
                 loop = asyncio.get_running_loop()
                 max_events = await loop.run_in_executor(None, _fetch_swing_orders)
-                if max_events and _ssl_sse_clients:
+                if max_events:
+                    # buffer for reconnecting clients (keep last 10)
+                    _ssl_recent_events.extend(max_events)
+                    del _ssl_recent_events[:-10]
                     msg = "data: " + json.dumps(max_events) + "\n\n"
+                    print(f"[swing-orders] Broadcasting {len(max_events)} max-pending event(s) to {len(_ssl_sse_clients)} client(s): {[e['symbol'] for e in max_events]}")
                     for q in list(_ssl_sse_clients):
                         await q.put(msg)
 
@@ -4129,9 +4134,14 @@ async def swingtrade_shortlist_webhook(payload: dict):
 
 @app.get("/api/swing-shortlist/stream")
 async def swing_shortlist_stream(request: Request):
-    """SSE stream — pushes max_pending events to connected clients."""
+    """SSE stream — pushes max_pending events to connected clients.
+    Replays any recent events on connect so a brief reconnect never misses a notification."""
     queue: asyncio.Queue = asyncio.Queue()
+    # Seed with any recent events the client may have missed while disconnected
+    if _ssl_recent_events:
+        await queue.put("data: " + json.dumps(_ssl_recent_events) + "\n\n")
     _ssl_sse_clients.append(queue)
+    print(f"[swing-orders] SSE client connected ({len(_ssl_sse_clients)} total)")
     async def event_gen():
         try:
             while True:
@@ -4145,6 +4155,7 @@ async def swing_shortlist_stream(request: Request):
         finally:
             try:
                 _ssl_sse_clients.remove(queue)
+                print(f"[swing-orders] SSE client disconnected ({len(_ssl_sse_clients)} remaining)")
             except ValueError:
                 pass
     return StreamingResponse(event_gen(), media_type="text/event-stream",
@@ -4321,12 +4332,16 @@ def swing_shortlist_ui():
   }
 
   // SSE — fires notification immediately when server detects a new day-max snapshot
+  const _seenMaxEvents = new Set();  // "symbol|at" keys to deduplicate replay on reconnect
   const _sslStream = new EventSource('/api/swing-shortlist/stream');
   _sslStream.onmessage = (e) => {
     try {
       const events = JSON.parse(e.data);
       events.forEach(ev => {
         if (ev.type === 'max_pending') {
+          const key = `${ev.symbol}|${ev.at}`;
+          if (_seenMaxEvents.has(key)) return;
+          _seenMaxEvents.add(key);
           const buy  = ev.buy  >= 1e6 ? (ev.buy/1e6).toFixed(2)+'M'  : ev.buy  >= 1e3 ? (ev.buy/1e3).toFixed(1)+'K'  : ev.buy;
           const sell = ev.sell >= 1e6 ? (ev.sell/1e6).toFixed(2)+'M' : ev.sell >= 1e3 ? (ev.sell/1e3).toFixed(1)+'K' : ev.sell;
           notify('Swing Shortlist — Max Pending', `${ev.symbol}  ▲${buy}  ▼${sell}`);
