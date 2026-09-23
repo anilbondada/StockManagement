@@ -4234,10 +4234,13 @@ def api_swing_shortlist(date: Optional[str] = None):
                 sl.symbol, sl.first_seen_at, sl.last_seen_at, sl.trigger_count,
                 sl.stage, sl.simulated, sl.status, sl.monitor_start_date,
                 sl.avg_volume, sl.max_volume, sl.max_volume_at, sl.snapshot_count,
-                -- avg pending: live from all snapshots today
+                -- moving avg: latest 30 snapshots
                 (SELECT AVG(buy_quantity)  FROM (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_pend_buy,
                 (SELECT AVG(sell_quantity) FROM (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_pend_sell,
                 (SELECT COUNT(*)           FROM (SELECT id            FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as pend_count,
+                -- total avg: all snapshots
+                (SELECT AVG(buy_quantity)  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_buy,
+                (SELECT AVG(sell_quantity) FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_sell,
                 -- snapshot with max combined pending (buy+sell)
                 (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_buy,
                 (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_pend_sell,
@@ -4249,7 +4252,7 @@ def api_swing_shortlist(date: Optional[str] = None):
             FROM swing_shortlist sl
             WHERE sl.date=?
             ORDER BY sl.trigger_count DESC, sl.first_seen_at ASC
-        """, (target,)*10).fetchall()
+        """, (target,)*12).fetchall()
     return {
         "date": target,
         "stocks": [
@@ -4273,9 +4276,11 @@ def api_swing_shortlist(date: Optional[str] = None):
                 "max_pend_buy":        r[15],
                 "max_pend_sell":       r[16],
                 "max_pend_at":         r[17],
-                "cur_buy":             r[18],
-                "cur_sell":            r[19],
-                "cur_at":              r[20],
+                "total_avg_buy":       r[18],
+                "total_avg_sell":      r[19],
+                "cur_buy":             r[20],
+                "cur_sell":            r[21],
+                "cur_at":              r[22],
             }
             for r in rows
         ]
@@ -4536,6 +4541,7 @@ def swing_shortlist_ui():
         <td>${stageBadge(s.stage)}</td>
         <td><span class="time">${s.monitor_start_date || '—'}</span></td>
         <td><span class="vol-buy">▲ ${fmtVol(s.avg_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.avg_pend_sell).replace(/<[^>]*>/g,'')}</span>${s.pend_count ? `<br><span class="time">${s.pend_count} snapshots</span>` : ''}</td>
+        <td>${s.total_avg_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.total_avg_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.total_avg_sell).replace(/<[^>]*>/g,'')}</span>` : '<span style="color:#4b5563">—</span>'}</td>
         <td>${s.max_pend_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.max_pend_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.max_pend_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.max_pend_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
         <td>${s.cur_buy != null ? `<span class="vol-buy">▲ ${fmtVol(s.cur_buy).replace(/<[^>]*>/g,'')}</span> <span class="vol-sell">▼ ${fmtVol(s.cur_sell).replace(/<[^>]*>/g,'')}</span><br><span class="time">${fmtVolTime(s.cur_at)}</span>` : '<span style="color:#4b5563">—</span>'}</td>
         <td><span class="time">${fmtTime(s.first_seen_at)}</span></td>
@@ -4545,7 +4551,7 @@ def swing_shortlist_ui():
     document.getElementById('tableWrap').innerHTML = `
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Monitor Start</th><th>Avg Pending</th><th>Max Pending</th><th>Current</th><th>First Seen</th><th>Last Seen</th>
+          <th>Symbol</th><th>Triggers</th><th>Status</th><th>Stage</th><th>Monitor Start</th><th>Moving Avg</th><th>Total Avg</th><th>Max Pending</th><th>Current</th><th>First Seen</th><th>Last Seen</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
@@ -4555,12 +4561,14 @@ def swing_shortlist_ui():
     const stocks = filteredStocks();
     if (!stocks.length) { alert('No data to export.'); return; }
     const esc = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const header = ['Symbol','Triggers','Status','Stage','Avg Pend Buy','Avg Pend Sell','Snapshots','Max Pend Buy','Max Pend Sell','Max Pend At','Cur Buy','Cur Sell','Cur At','First Seen','Last Seen','Simulated'];
+    const header = ['Symbol','Triggers','Status','Stage','Moving Avg Buy','Moving Avg Sell','Snapshots','Total Avg Buy','Total Avg Sell','Max Pend Buy','Max Pend Sell','Max Pend At','Cur Buy','Cur Sell','Cur At','First Seen','Last Seen','Simulated'];
     const rows   = stocks.map(s => [
       esc(s.symbol), s.trigger_count, esc(s.status || ''), esc(s.stage || ''),
-      s.avg_pend_buy  != null ? Math.round(s.avg_pend_buy)  : '',
-      s.avg_pend_sell != null ? Math.round(s.avg_pend_sell) : '',
+      s.avg_pend_buy   != null ? Math.round(s.avg_pend_buy)   : '',
+      s.avg_pend_sell  != null ? Math.round(s.avg_pend_sell)  : '',
       s.pend_count || '',
+      s.total_avg_buy  != null ? Math.round(s.total_avg_buy)  : '',
+      s.total_avg_sell != null ? Math.round(s.total_avg_sell) : '',
       s.max_pend_buy  != null ? s.max_pend_buy  : '',
       s.max_pend_sell != null ? s.max_pend_sell : '',
       esc(s.max_pend_at || ''),
