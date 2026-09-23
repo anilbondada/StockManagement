@@ -4265,6 +4265,8 @@ def swing_shortlist_ui():
   let _allStocks = [];
   let _activeFilter = 'all';
   let _knownSymbols = null;   // null = first load, Set after that
+  let _prevCounts = {};
+  let _maxPendNotified = {};  // symbol -> cur_at timestamp when max-pending notif was last sent
 
   // Request notification permission once
   if ('Notification' in window && Notification.permission === 'default') {
@@ -4369,6 +4371,18 @@ def swing_shortlist_ui():
                  retriggered.map(s => `${s.symbol} (${s.trigger_count}×)`).join(', '));
         }
       }
+      // Notify when current snapshot is also the day's max pending
+      const atMaxPending = _allStocks.filter(s =>
+        s.cur_at && s.max_pend_at && s.cur_at === s.max_pend_at &&
+        s.pend_count > 1 &&
+        _maxPendNotified[s.symbol] !== s.cur_at
+      );
+      if (atMaxPending.length > 0) {
+        atMaxPending.forEach(s => { _maxPendNotified[s.symbol] = s.cur_at; });
+        notify('Swing Shortlist — Max Pending',
+               atMaxPending.map(s => `${s.symbol} ▲${fmtVol(s.cur_buy).replace(/<[^>]*>/g,'')} ▼${fmtVol(s.cur_sell).replace(/<[^>]*>/g,'')}`).join('\n'));
+      }
+
       _knownSymbols = incoming;
       _prevCounts   = Object.fromEntries(_allStocks.map(s => [s.symbol, s.trigger_count]));
 
@@ -4379,7 +4393,6 @@ def swing_shortlist_ui():
       document.getElementById('tableWrap').innerHTML = '<div class="empty" style="color:#f87171">Error: ' + e.message + '</div>';
     }
   }
-  let _prevCounts = {};
 
   function renderSummary(date) {
     const stocks    = _allStocks;
