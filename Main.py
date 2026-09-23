@@ -4827,7 +4827,8 @@ input[type=date]:focus,input[type=text]:focus{border-color:#4f46e5}
 .btn-primary:hover:not(:disabled){background:#4338ca}
 .btn-primary:disabled{background:#a5b4fc;cursor:not-allowed}
 .btn-outline{background:#fff;color:#4f46e5;border:1.5px solid #4f46e5}
-.btn-outline:hover{background:#eef2ff}
+.btn-outline:hover:not(:disabled){background:#eef2ff}
+.btn-outline:disabled{background:#f5f5f5;color:#a0a0a0;border-color:#d0d0d0;cursor:not-allowed}
 .btn-sm{padding:5px 12px;font-size:.8rem}
 #csvInput{display:none}
 
