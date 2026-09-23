@@ -4210,7 +4210,7 @@ async def api_discard_stock(payload: dict):
         raise HTTPException(status_code=400, detail="symbol and date required")
     with _db() as conn:
         conn.execute(
-            "UPDATE swing_shortlist SET status='discarded' WHERE symbol=? AND date=?",
+            "UPDATE swing_shortlist SET status='discarded', monitor_start_date=NULL WHERE symbol=? AND date=?",
             (symbol, date)
         )
     return {"status": "discarded", "symbol": symbol}
