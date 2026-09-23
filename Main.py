@@ -4264,6 +4264,17 @@ def swing_shortlist_ui():
 <script>
   let _allStocks = [];
   let _activeFilter = 'all';
+  let _knownSymbols = null;   // null = first load, Set after that
+
+  // Request notification permission once
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+  function notify(title, body) {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body });
+    }
+  }
 
   function fmtVol(v) {
     if (v == null) return '<span style="color:#4b5563">—</span>';
@@ -4337,6 +4348,30 @@ def swing_shortlist_ui():
     try {
       const data = await fetch(url).then(r => r.json());
       _allStocks = data.stocks || [];
+
+      // Detect new symbols since last refresh and notify
+      const incoming = new Set(_allStocks.map(s => s.symbol));
+      if (_knownSymbols !== null) {
+        const newSyms = [...incoming].filter(s => !_knownSymbols.has(s));
+        if (newSyms.length > 0) {
+          notify('Swing Shortlist — New Stock' + (newSyms.length > 1 ? 's' : ''),
+                 newSyms.join(', ') + ' added');
+        }
+        // Also notify if trigger count increased for an existing symbol
+        const retriggered = _allStocks
+          .filter(s => _knownSymbols.has(s.symbol) && s.trigger_count > 1)
+          .filter(s => {
+            const prev = _prevCounts[s.symbol];
+            return prev !== undefined && s.trigger_count > prev;
+          });
+        if (retriggered.length > 0) {
+          notify('Swing Shortlist — Re-triggered',
+                 retriggered.map(s => `${s.symbol} (${s.trigger_count}×)`).join(', '));
+        }
+      }
+      _knownSymbols = incoming;
+      _prevCounts   = Object.fromEntries(_allStocks.map(s => [s.symbol, s.trigger_count]));
+
       renderSummary(data.date);
       renderTable();
       document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',hour12:true,timeZone:'Asia/Kolkata'});
@@ -4344,6 +4379,7 @@ def swing_shortlist_ui():
       document.getElementById('tableWrap').innerHTML = '<div class="empty" style="color:#f87171">Error: ' + e.message + '</div>';
     }
   }
+  let _prevCounts = {};
 
   function renderSummary(date) {
     const stocks    = _allStocks;
