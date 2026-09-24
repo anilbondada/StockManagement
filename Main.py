@@ -4365,7 +4365,7 @@ def api_swing_monitor():
             FROM swing_shortlist sl
             WHERE sl.status='monitored'
             ORDER BY sl.monitor_start_date ASC, sl.symbol ASC
-        """, (today,)*12).fetchall()
+        """, (today,)*9).fetchall()
     result = []
     for r in rows:
         avg_buy  = r[3] or 0; avg_sell  = r[4] or 0
