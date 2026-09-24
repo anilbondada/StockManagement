@@ -4361,11 +4361,13 @@ def api_swing_monitor():
                 (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_at,
                 (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_buy,
                 (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_sell,
-                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_at
+                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_at,
+                (SELECT AVG(buy_quantity)  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_buy,
+                (SELECT AVG(sell_quantity) FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_sell
             FROM swing_shortlist sl
             WHERE sl.status='monitored'
             ORDER BY sl.monitor_start_date ASC, sl.symbol ASC
-        """, (today,)*9).fetchall()
+        """, (today,)*11).fetchall()
     result = []
     for r in rows:
         avg_buy  = r[3] or 0; avg_sell  = r[4] or 0
@@ -4373,7 +4375,7 @@ def api_swing_monitor():
         avg_comb = avg_buy + avg_sell
         cur_comb = cur_buy + cur_sell
         surge    = avg_comb > 0 and cur_comb >= 2 * avg_comb
-        pct_vs_avg = round((cur_comb / avg_comb - 1) * 100, 1) if avg_comb > 0 and cur_comb > 0 else None
+        pct_vs_moving = round((cur_comb / avg_comb - 1) * 100, 1) if avg_comb > 0 and cur_comb > 0 else None
         days_monitored = None
         if r[1]:
             try:
@@ -4386,7 +4388,8 @@ def api_swing_monitor():
             "avg_buy": r[3], "avg_sell": r[4], "snap_count": r[5],
             "max_buy": r[6], "max_sell": r[7], "max_at": r[8],
             "cur_buy": r[9], "cur_sell": r[10], "cur_at": r[11],
-            "surge": surge, "pct_vs_avg": pct_vs_avg,
+            "total_avg_buy": r[12], "total_avg_sell": r[13],
+            "surge": surge, "pct_vs_moving": pct_vs_moving,
         })
     return {"date": today, "stocks": result}
 
@@ -4476,16 +4479,17 @@ def swing_monitor_ui():
     <th onclick="sortBy('days_monitored')">Days</th>
     <th onclick="sortBy('cur_comb')">Current Pending</th>
     <th onclick="sortBy('snap_count')">Candles</th>
-    <th onclick="sortBy('avg_comb')">Moving Avg</th>
+    <th onclick="sortBy('avg_comb')">Moving Avg (30)</th>
+    <th onclick="sortBy('total_avg_comb')">Total Avg</th>
     <th onclick="sortBy('max_comb')">Day Max</th>
-    <th onclick="sortBy('pct_vs_avg')">vs Avg</th>
+    <th onclick="sortBy('pct_vs_moving')">vs Moving Avg</th>
   </tr></thead>
   <tbody id="tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
 </table></div>
 
 <script>
 let _data = [];
-let _sortCol = 'pct_vs_avg', _sortAsc = false;
+let _sortCol = 'pct_vs_moving', _sortAsc = false;
 let _surgeSet = new Set();
 
 function fv(n) {
@@ -4518,7 +4522,7 @@ function sortBy(col) {
   if (_sortCol === col) _sortAsc = !_sortAsc;
   else { _sortCol = col; _sortAsc = col === 'symbol' || col === 'stage' || col === 'monitor_start_date'; }
   document.querySelectorAll('thead th').forEach(th => th.classList.remove('sorted'));
-  const idx = ['symbol','stage','monitor_start_date','days_monitored','cur_comb','snap_count','avg_comb','max_comb','pct_vs_avg'];
+  const idx = ['symbol','stage','monitor_start_date','days_monitored','cur_comb','snap_count','avg_comb','total_avg_comb','max_comb','pct_vs_moving'];
   const el = document.querySelectorAll('thead th')[idx.indexOf(col)];
   if (el) el.classList.add('sorted');
   render();
@@ -4544,15 +4548,16 @@ function render() {
     const rowCls  = isSurge ? 'surge-row' : '';
     const flash   = _surgeSet.has(s.symbol) ? ' flash' : '';
     const hasData = s.snap_count > 0;
-    const pctHtml = s.pct_vs_avg !== null
-      ? (s.pct_vs_avg >= 0
-          ? '<span class="pct-up">+' + s.pct_vs_avg + '%</span>'
-          : '<span class="pct-dn">' + s.pct_vs_avg + '%</span>')
+    const pctHtml = s.pct_vs_moving !== null
+      ? (s.pct_vs_moving >= 0
+          ? '<span class="pct-up">+' + s.pct_vs_moving + '%</span>'
+          : '<span class="pct-dn">' + s.pct_vs_moving + '%</span>')
       : '<span class="muted">—</span>';
     const surgeBadge = isSurge ? '<span class="surge-badge">SURGE</span>' : '';
-    const cur_comb = (s.cur_buy||0)+(s.cur_sell||0);
-    const avg_comb = (s.avg_buy||0)+(s.avg_sell||0);
-    const max_comb = (s.max_buy||0)+(s.max_sell||0);
+    const cur_comb       = (s.cur_buy||0)+(s.cur_sell||0);
+    const avg_comb       = (s.avg_buy||0)+(s.avg_sell||0);
+    const total_avg_comb = (s.total_avg_buy||0)+(s.total_avg_sell||0);
+    const max_comb       = (s.max_buy||0)+(s.max_sell||0);
 
     html += `<tr class="${rowCls}${flash}" id="row-${s.symbol}">
       <td><span class="sym">${s.symbol}</span>${surgeBadge}</td>
@@ -4562,6 +4567,7 @@ function render() {
       <td>${hasData ? '<span class="vol buy">▲ '+fv(s.cur_buy)+'</span> <span class="vol sell">▼ '+fv(s.cur_sell)+'</span><div class="time">'+ft(s.cur_at)+'</div>' : '<span class="no-data">No data</span>'}</td>
       <td><span class="candles">${s.snap_count||0} / 30</span></td>
       <td>${hasData && avg_comb > 0 ? '<span class="vol buy">▲ '+fv(s.avg_buy)+'</span> <span class="vol sell">▼ '+fv(s.avg_sell)+'</span>' : '<span class="no-data">—</span>'}</td>
+      <td>${hasData && total_avg_comb > 0 ? '<span class="vol buy">▲ '+fv(s.total_avg_buy)+'</span> <span class="vol sell">▼ '+fv(s.total_avg_sell)+'</span>' : '<span class="no-data">—</span>'}</td>
       <td>${hasData && max_comb > 0 ? '<span class="vol buy">▲ '+fv(s.max_buy)+'</span> <span class="vol sell">▼ '+fv(s.max_sell)+'</span><div class="time">'+ft(s.max_at)+'</div>' : '<span class="no-data">—</span>'}</td>
       <td>${pctHtml}</td>
     </tr>`;
@@ -4586,9 +4592,10 @@ async function load() {
     const data = await res.json();
     _data = data.stocks.map(s => ({
       ...s,
-      cur_comb: (s.cur_buy||0)+(s.cur_sell||0),
-      avg_comb: (s.avg_buy||0)+(s.avg_sell||0),
-      max_comb: (s.max_buy||0)+(s.max_sell||0),
+      cur_comb:       (s.cur_buy||0)+(s.cur_sell||0),
+      avg_comb:       (s.avg_buy||0)+(s.avg_sell||0),
+      total_avg_comb: (s.total_avg_buy||0)+(s.total_avg_sell||0),
+      max_comb:       (s.max_buy||0)+(s.max_sell||0),
     }));
     renderStats(_data);
     render();
