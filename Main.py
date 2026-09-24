@@ -1371,6 +1371,19 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;paddi
       <div class="card-desc">ChartInk webhook — daily shortlisted stocks &amp; trigger counts</div>
     </a>
 
+    <a class="card" href="/swing-monitor">
+      <div class="icon icon-blue">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <polyline points="8 21 12 17 16 21"/>
+          <line x1="12" y1="17" x2="12" y2="21"/>
+          <polyline points="6 9 10 13 14 9 18 11"/>
+        </svg>
+      </div>
+      <div class="card-name">Swing Monitor</div>
+      <div class="card-desc">Live volume tracking for all monitored stocks</div>
+    </a>
+
     <a class="card" href="/chartink-alerts">
       <div class="icon icon-orange">
         <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
