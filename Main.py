@@ -4230,13 +4230,12 @@ async def api_run_swing_analysis():
 @app.post("/api/swing-shortlist/discard")
 async def api_discard_stock(payload: dict):
     symbol = payload.get("symbol", "").strip()
-    date   = payload.get("date", "").strip()
-    if not symbol or not date:
-        raise HTTPException(status_code=400, detail="symbol and date required")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol required")
     with _db() as conn:
         conn.execute(
-            "UPDATE swing_shortlist SET status='discarded', monitor_start_date=NULL WHERE symbol=? AND date=?",
-            (symbol, date)
+            "UPDATE swing_shortlist SET status='discarded', monitor_start_date=NULL WHERE symbol=?",
+            (symbol,)
         )
     return {"status": "discarded", "symbol": symbol}
 
@@ -4261,10 +4260,13 @@ async def api_add_from_analysis(payload: dict):
             if not sym:
                 continue
             existing = conn.execute(
-                "SELECT id, trigger_count, monitor_start_date FROM swing_shortlist WHERE symbol=?",
+                "SELECT id, trigger_count, monitor_start_date, status FROM swing_shortlist WHERE symbol=?",
                 (sym,)
             ).fetchone()
             if existing:
+                if existing[3] == "discarded":
+                    upserted.append({"symbol": sym, "action": "skipped_discarded"})
+                    continue
                 if existing[2] is None:
                     conn.execute(
                         "UPDATE swing_shortlist SET trigger_count=trigger_count+1, last_seen_at=?, date=?, simulated=0, status='monitored', monitor_start_date=? WHERE id=?",
@@ -4802,16 +4804,16 @@ def swing_shortlist_ui():
 
   function statusBadge(status, symbol, date) {
     if (!status) return '<span class="status-pending">—</span>';
-    if (status === 'monitored') return `<span class="status-monitored">✓ Monitored</span><button class="btn-discard" onclick="discardStock('${symbol}','${date}')">Discard</button>`;
+    if (status === 'monitored') return `<span class="status-monitored">✓ Monitored</span><button class="btn-discard" onclick="discardStock('${symbol}')">Discard</button>`;
     if (status === 'expired')   return '<span class="status-expired">⏱ Expired</span>';
     return '<span class="status-discarded">✗ Discarded</span>';
   }
 
-  async function discardStock(symbol, date) {
+  async function discardStock(symbol) {
     await fetch('/api/swing-shortlist/discard', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({symbol, date})
+      body: JSON.stringify({symbol})
     });
     load();
   }
