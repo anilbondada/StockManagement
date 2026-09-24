@@ -305,6 +305,8 @@ def init_db():
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN max_volume_at TEXT")
         if "monitor_start_date" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN monitor_start_date TEXT")
+        if "last_surge_at" not in ssl_cols:
+            conn.execute("ALTER TABLE swing_shortlist ADD COLUMN last_surge_at TEXT")
         # Order book snapshots — collected every 5 min during market hours
         conn.execute("""
             CREATE TABLE IF NOT EXISTS swing_shortlist_orders (
@@ -923,6 +925,8 @@ def _fetch_swing_orders() -> list:
             )
             if new_combined > prev_max:
                 event_type = "vol_surge" if avg_combined > 0 and new_combined >= 2 * avg_combined else "max_pending"
+                if event_type == "vol_surge":
+                    conn.execute("UPDATE swing_shortlist SET last_surge_at=? WHERE symbol=?", (ts, sym))
                 max_events.append({"type": event_type, "symbol": sym, "buy": new_buy, "sell": new_sell, "at": ts})
     print(f"[swing-orders] Snapshot saved for {len(symbols)} symbols at {ts}")
     return max_events
@@ -4363,7 +4367,8 @@ def api_swing_monitor():
                 (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_sell,
                 (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_at,
                 (SELECT AVG(buy_quantity)  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_buy,
-                (SELECT AVG(sell_quantity) FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_sell
+                (SELECT AVG(sell_quantity) FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=?) as total_avg_sell,
+                sl.last_surge_at
             FROM swing_shortlist sl
             WHERE sl.status='monitored'
             ORDER BY sl.monitor_start_date ASC, sl.symbol ASC
@@ -4389,6 +4394,7 @@ def api_swing_monitor():
             "max_buy": r[6], "max_sell": r[7], "max_at": r[8],
             "cur_buy": r[9], "cur_sell": r[10], "cur_at": r[11],
             "total_avg_buy": r[12], "total_avg_sell": r[13],
+            "last_surge_at": r[14],
             "surge": surge, "pct_vs_moving": pct_vs_moving,
         })
     return {"date": today, "stocks": result}
@@ -4483,6 +4489,7 @@ def swing_monitor_ui():
     <th onclick="sortBy('total_avg_comb')">Total Avg</th>
     <th onclick="sortBy('max_comb')">Day Max</th>
     <th onclick="sortBy('pct_vs_moving')">vs Moving Avg</th>
+    <th onclick="sortBy('last_surge_at')">Alerted At</th>
   </tr></thead>
   <tbody id="tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
 </table></div>
@@ -4503,6 +4510,15 @@ function ft(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}); } catch{ return ''; }
 }
+function fdt(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const day = d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'});
+    const time = d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    return day + ' ' + time;
+  } catch{ return ''; }
+}
 function stageClass(s) {
   if (!s) return 'stg-gray';
   if (/Stage 2|Advancing/i.test(s)) return 'stg-green';
@@ -4522,7 +4538,7 @@ function sortBy(col) {
   if (_sortCol === col) _sortAsc = !_sortAsc;
   else { _sortCol = col; _sortAsc = col === 'symbol' || col === 'stage' || col === 'monitor_start_date'; }
   document.querySelectorAll('thead th').forEach(th => th.classList.remove('sorted'));
-  const idx = ['symbol','stage','monitor_start_date','days_monitored','cur_comb','snap_count','avg_comb','total_avg_comb','max_comb','pct_vs_moving'];
+  const idx = ['symbol','stage','monitor_start_date','days_monitored','cur_comb','snap_count','avg_comb','total_avg_comb','max_comb','pct_vs_moving','last_surge_at'];
   const el = document.querySelectorAll('thead th')[idx.indexOf(col)];
   if (el) el.classList.add('sorted');
   render();
@@ -4570,6 +4586,7 @@ function render() {
       <td>${hasData && total_avg_comb > 0 ? '<span class="vol buy">▲ '+fv(s.total_avg_buy)+'</span> <span class="vol sell">▼ '+fv(s.total_avg_sell)+'</span>' : '<span class="no-data">—</span>'}</td>
       <td>${hasData && max_comb > 0 ? '<span class="vol buy">▲ '+fv(s.max_buy)+'</span> <span class="vol sell">▼ '+fv(s.max_sell)+'</span><div class="time">'+ft(s.max_at)+'</div>' : '<span class="no-data">—</span>'}</td>
       <td>${pctHtml}</td>
+      <td>${s.last_surge_at ? '<span style="color:#fb923c;font-size:.8rem;font-weight:600">'+fdt(s.last_surge_at)+'</span>' : '<span class="muted">—</span>'}</td>
     </tr>`;
   });
   document.getElementById('tbody').innerHTML = html;
