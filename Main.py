@@ -4332,6 +4332,286 @@ def api_swing_shortlist(date: Optional[str] = None):
     }
 
 
+@app.get("/api/swing-monitor")
+def api_swing_monitor():
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    today  = datetime.now(ist_tz).strftime("%Y-%m-%d")
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT
+                sl.symbol, sl.monitor_start_date, sl.stage,
+                (SELECT AVG(buy_quantity)  FROM (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_buy,
+                (SELECT AVG(sell_quantity) FROM (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as avg_sell,
+                (SELECT COUNT(*)           FROM (SELECT id            FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 30)) as snap_count,
+                (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_buy,
+                (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_sell,
+                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY (buy_quantity+sell_quantity) DESC LIMIT 1) as max_at,
+                (SELECT buy_quantity  FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_buy,
+                (SELECT sell_quantity FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_sell,
+                (SELECT timestamp     FROM swing_shortlist_orders WHERE symbol=sl.symbol AND date=? ORDER BY timestamp DESC LIMIT 1) as cur_at
+            FROM swing_shortlist sl
+            WHERE sl.status='monitored'
+            ORDER BY sl.monitor_start_date ASC, sl.symbol ASC
+        """, (today,)*12).fetchall()
+    result = []
+    for r in rows:
+        avg_buy  = r[3] or 0; avg_sell  = r[4] or 0
+        cur_buy  = r[9] or 0; cur_sell  = r[10] or 0
+        avg_comb = avg_buy + avg_sell
+        cur_comb = cur_buy + cur_sell
+        surge    = avg_comb > 0 and cur_comb >= 2 * avg_comb
+        pct_vs_avg = round((cur_comb / avg_comb - 1) * 100, 1) if avg_comb > 0 and cur_comb > 0 else None
+        days_monitored = None
+        if r[1]:
+            try:
+                days_monitored = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(r[1], "%Y-%m-%d")).days
+            except Exception:
+                pass
+        result.append({
+            "symbol": r[0], "monitor_start_date": r[1], "days_monitored": days_monitored,
+            "stage": r[2],
+            "avg_buy": r[3], "avg_sell": r[4], "snap_count": r[5],
+            "max_buy": r[6], "max_sell": r[7], "max_at": r[8],
+            "cur_buy": r[9], "cur_sell": r[10], "cur_at": r[11],
+            "surge": surge, "pct_vs_avg": pct_vs_avg,
+        })
+    return {"date": today, "stocks": result}
+
+
+@app.get("/swing-monitor", response_class=HTMLResponse)
+def swing_monitor_ui():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Swing Monitor</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#0a0a14;color:#e2e8f0;padding:20px 16px;min-height:100vh}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{font-size:1.25rem;font-weight:700;color:#fff}
+    .meta{font-size:.8rem;color:#6b7280;margin-top:3px}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer;background:#1e1e2e;color:#9ca3af;text-decoration:none;display:inline-flex;align-items:center;gap:5px}
+    .btn:hover{background:#2a2a3e;color:#e2e8f0}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-primary:hover{background:#4338ca}
+    .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+    .stat{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:10px;padding:12px 18px;min-width:110px}
+    .stat-label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+    .stat-value{font-size:1.4rem;font-weight:700;color:#fff}
+    .stat-value.surge-val{color:#fb923c}
+    .tbl-wrap{overflow-x:auto;border-radius:12px;border:1px solid #1e1e2e}
+    table{width:100%;border-collapse:collapse;font-size:.84rem}
+    thead th{padding:10px 12px;text-align:left;color:#6b7280;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid #1e1e2e;background:#13131f;white-space:nowrap;cursor:pointer;user-select:none}
+    thead th:hover{color:#a5b4fc}
+    thead th.sorted{color:#a5b4fc}
+    tbody tr{border-bottom:1px solid #111120;transition:background .1s}
+    tbody tr:hover{background:#13131f}
+    tbody tr.surge-row{background:#1a0f00}
+    tbody tr.surge-row:hover{background:#231500}
+    tbody tr.flash{animation:rowflash .8s ease-out}
+    @keyframes rowflash{0%{background:#7c2d12}100%{background:inherit}}
+    td{padding:10px 12px;vertical-align:middle;white-space:nowrap}
+    .sym{font-weight:700;color:#e2e8f0;font-size:.92rem}
+    .stg-badge{padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:700;display:inline-block;white-space:nowrap}
+    .stg-green{background:#14532d;color:#86efac}
+    .stg-red{background:#450a0a;color:#fca5a5}
+    .stg-orange{background:#431407;color:#fb923c}
+    .stg-yellow{background:#44350a;color:#fde68a}
+    .stg-blue{background:#1e3a5f;color:#93c5fd}
+    .stg-gray{background:#1f2937;color:#6b7280}
+    .vol{font-variant-numeric:tabular-nums}
+    .buy{color:#86efac}
+    .sell{color:#fca5a5}
+    .muted{color:#4b5563;font-size:.75rem}
+    .time{color:#4b5563;font-size:.74rem;margin-top:2px}
+    .pct-up{color:#fb923c;font-weight:700;font-size:.78rem}
+    .pct-dn{color:#6b7280;font-size:.78rem}
+    .surge-badge{background:#7c2d12;color:#fb923c;border:1px solid #9a3412;padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700;display:inline-block;margin-left:4px}
+    .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle}
+    .dot-live{background:#22c55e;animation:pulse 1.4s infinite}
+    .dot-off{background:#4b5563}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .empty{text-align:center;padding:60px;color:#4b5563}
+    .days-badge{display:inline-block;background:#1e1e2e;border:1px solid #2a2a3e;border-radius:999px;padding:1px 8px;font-size:.72rem;color:#9ca3af;font-variant-numeric:tabular-nums}
+    .candles{font-size:.75rem;color:#4b5563}
+    .no-data{color:#2a2a3e;font-size:.8rem;text-align:center}
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Swing Monitor</h1>
+    <div class="meta"><span class="dot dot-off" id="liveDoc"></span><span id="lastUpdated">Loading…</span></div>
+  </div>
+  <div class="controls">
+    <button class="btn btn-primary" onclick="load()">Refresh</button>
+    <a href="/swing-shortlist" class="btn">Shortlist</a>
+    <a href="/" class="btn">← Home</a>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+<div class="tbl-wrap"><table id="tbl">
+  <thead><tr>
+    <th onclick="sortBy('symbol')">Symbol</th>
+    <th onclick="sortBy('stage')">Stage</th>
+    <th onclick="sortBy('monitor_start_date')">Start Date</th>
+    <th onclick="sortBy('days_monitored')">Days</th>
+    <th onclick="sortBy('cur_comb')">Current Pending</th>
+    <th onclick="sortBy('snap_count')">Candles</th>
+    <th onclick="sortBy('avg_comb')">Moving Avg</th>
+    <th onclick="sortBy('max_comb')">Day Max</th>
+    <th onclick="sortBy('pct_vs_avg')">vs Avg</th>
+  </tr></thead>
+  <tbody id="tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+</table></div>
+
+<script>
+let _data = [];
+let _sortCol = 'pct_vs_avg', _sortAsc = false;
+let _surgeSet = new Set();
+
+function fv(n) {
+  if (n === null || n === undefined) return '—';
+  if (n >= 1e7) return (n/1e7).toFixed(2)+'Cr';
+  if (n >= 1e5) return (n/1e5).toFixed(2)+'L';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return Math.round(n).toLocaleString();
+}
+function ft(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}); } catch{ return ''; }
+}
+function stageClass(s) {
+  if (!s) return 'stg-gray';
+  if (/Stage 2|Advancing/i.test(s)) return 'stg-green';
+  if (/Stage 4|Declining/i.test(s)) return 'stg-red';
+  if (/Stage 3|Topping|Distribution/i.test(s)) return 'stg-orange';
+  if (/Transition/i.test(s)) return 'stg-yellow';
+  if (/Stage 1|Basing|Accumulation/i.test(s)) return 'stg-blue';
+  return 'stg-gray';
+}
+function shortStage(s) {
+  if (!s) return '—';
+  if (/Insufficient/i.test(s)) return 'N/A';
+  return s.replace(/Stage (\\d).*?\\(([^)]+)\\).*/, 'S$1 $2').replace(/Stage.*?Transition.*?\\(([^)]+)\\).*/, 'Transition');
+}
+
+function sortBy(col) {
+  if (_sortCol === col) _sortAsc = !_sortAsc;
+  else { _sortCol = col; _sortAsc = col === 'symbol' || col === 'stage' || col === 'monitor_start_date'; }
+  document.querySelectorAll('thead th').forEach(th => th.classList.remove('sorted'));
+  const idx = ['symbol','stage','monitor_start_date','days_monitored','cur_comb','snap_count','avg_comb','max_comb','pct_vs_avg'];
+  const el = document.querySelectorAll('thead th')[idx.indexOf(col)];
+  if (el) el.classList.add('sorted');
+  render();
+}
+
+function render() {
+  const sorted = [..._data].sort((a, b) => {
+    let av = a[_sortCol], bv = b[_sortCol];
+    if (av === null || av === undefined) av = _sortAsc ? Infinity : -Infinity;
+    if (bv === null || bv === undefined) bv = _sortAsc ? Infinity : -Infinity;
+    if (typeof av === 'number' && typeof bv === 'number') return _sortAsc ? av - bv : bv - av;
+    return _sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+  });
+
+  if (!sorted.length) {
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="9" class="empty">No monitored stocks</td></tr>';
+    return;
+  }
+
+  let html = '';
+  sorted.forEach(s => {
+    const isSurge = s.surge;
+    const rowCls  = isSurge ? 'surge-row' : '';
+    const flash   = _surgeSet.has(s.symbol) ? ' flash' : '';
+    const hasData = s.snap_count > 0;
+    const pctHtml = s.pct_vs_avg !== null
+      ? (s.pct_vs_avg >= 0
+          ? '<span class="pct-up">+' + s.pct_vs_avg + '%</span>'
+          : '<span class="pct-dn">' + s.pct_vs_avg + '%</span>')
+      : '<span class="muted">—</span>';
+    const surgeBadge = isSurge ? '<span class="surge-badge">SURGE</span>' : '';
+    const cur_comb = (s.cur_buy||0)+(s.cur_sell||0);
+    const avg_comb = (s.avg_buy||0)+(s.avg_sell||0);
+    const max_comb = (s.max_buy||0)+(s.max_sell||0);
+
+    html += `<tr class="${rowCls}${flash}" id="row-${s.symbol}">
+      <td><span class="sym">${s.symbol}</span>${surgeBadge}</td>
+      <td>${s.stage ? '<span class="stg-badge '+stageClass(s.stage)+'">'+shortStage(s.stage)+'</span>' : '<span class="muted">—</span>'}</td>
+      <td><span class="vol">${s.monitor_start_date||'—'}</span></td>
+      <td>${s.days_monitored !== null ? '<span class="days-badge">Day '+s.days_monitored+'</span>' : '<span class="muted">—</span>'}</td>
+      <td>${hasData ? '<span class="vol buy">▲ '+fv(s.cur_buy)+'</span> <span class="vol sell">▼ '+fv(s.cur_sell)+'</span><div class="time">'+ft(s.cur_at)+'</div>' : '<span class="no-data">No data</span>'}</td>
+      <td><span class="candles">${s.snap_count||0} / 30</span></td>
+      <td>${hasData && avg_comb > 0 ? '<span class="vol buy">▲ '+fv(s.avg_buy)+'</span> <span class="vol sell">▼ '+fv(s.avg_sell)+'</span>' : '<span class="no-data">—</span>'}</td>
+      <td>${hasData && max_comb > 0 ? '<span class="vol buy">▲ '+fv(s.max_buy)+'</span> <span class="vol sell">▼ '+fv(s.max_sell)+'</span><div class="time">'+ft(s.max_at)+'</div>' : '<span class="no-data">—</span>'}</td>
+      <td>${pctHtml}</td>
+    </tr>`;
+  });
+  document.getElementById('tbody').innerHTML = html;
+}
+
+function renderStats(stocks) {
+  const total  = stocks.length;
+  const withData = stocks.filter(s => s.snap_count > 0).length;
+  const surges = stocks.filter(s => s.surge).length;
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="stat-label">Monitored</div><div class="stat-value">${total}</div></div>
+    <div class="stat"><div class="stat-label">With Data Today</div><div class="stat-value">${withData}</div></div>
+    <div class="stat"><div class="stat-label">Surges Today</div><div class="stat-value surge-val">${surges}</div></div>`;
+}
+
+async function load() {
+  try {
+    const res = await fetch('/api/swing-monitor');
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    _data = data.stocks.map(s => ({
+      ...s,
+      cur_comb: (s.cur_buy||0)+(s.cur_sell||0),
+      avg_comb: (s.avg_buy||0)+(s.avg_sell||0),
+      max_comb: (s.max_buy||0)+(s.max_sell||0),
+    }));
+    renderStats(_data);
+    render();
+    document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  } catch(e) {
+    document.getElementById('tbody').innerHTML = '<tr><td colspan="9" class="empty">Error: ' + e.message + '</td></tr>';
+  }
+}
+
+// SSE — real-time surge highlights
+const _sse = new EventSource('/api/swing-shortlist/stream');
+const _dot = document.getElementById('liveDoc');
+_sse.onopen = () => { _dot.className = 'dot dot-live'; };
+_sse.onerror = () => { _dot.className = 'dot dot-off'; };
+_sse.onmessage = (e) => {
+  try {
+    const events = JSON.parse(e.data);
+    events.forEach(ev => {
+      if (ev.type === 'vol_surge' || ev.type === 'max_pending') {
+        _surgeSet.add(ev.symbol);
+        setTimeout(() => _surgeSet.delete(ev.symbol), 5000);
+        // Refresh data to pick up latest snapshot
+        load();
+      }
+    });
+  } catch {}
+};
+
+// Auto-refresh every 30 s
+setInterval(load, 30000);
+load();
+</script>
+</body>
+</html>"""
+
+
 @app.get("/swing-shortlist", response_class=HTMLResponse)
 def swing_shortlist_ui():
     return """<!DOCTYPE html>
@@ -4406,6 +4686,7 @@ def swing_shortlist_ui():
     <input type="date" id="dateInput" onchange="load()"/>
     <button class="btn btn-primary" onclick="load()">Refresh</button>
     <button class="btn" id="runBtn" onclick="runAnalysis()" title="Run Weinstein stage analysis for today's stocks">Run Analysis</button>
+    <a href="/swing-monitor" class="btn">Monitor</a>
     <a href="/" class="btn">← Home</a>
   </div>
 </div>
