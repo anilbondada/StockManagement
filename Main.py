@@ -4378,6 +4378,27 @@ def api_swing_shortlist(date: Optional[str] = None):
     }
 
 
+@app.get("/api/swing-orders/{symbol}")
+def api_swing_orders_for_symbol(symbol: str, date: Optional[str] = None):
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    target = date or datetime.now(ist_tz).strftime("%Y-%m-%d")
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT timestamp, buy_quantity, sell_quantity
+            FROM swing_shortlist_orders
+            WHERE symbol=? AND date=?
+            ORDER BY timestamp ASC
+        """, (symbol.upper(), target)).fetchall()
+    return {
+        "symbol": symbol.upper(),
+        "date": target,
+        "snapshots": [
+            {"ts": r[0], "buy": r[1] or 0, "sell": r[2] or 0, "combined": (r[1] or 0) + (r[2] or 0)}
+            for r in rows
+        ]
+    }
+
+
 @app.get("/api/swing-alerts")
 def api_swing_alerts():
     with _db() as conn:
@@ -4464,6 +4485,18 @@ def swing_alerts_ui():
     input[type=date]{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:8px;color:#e2e8f0;padding:6px 10px;font-size:.83rem}
     input[type=text]{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:8px;color:#e2e8f0;padding:6px 10px;font-size:.83rem;width:160px}
     input[type=text]::placeholder{color:#4b5563}
+    .chart-btn{background:none;border:1px solid #2a2a3e;border-radius:6px;cursor:pointer;padding:2px 8px;font-size:.73rem;color:#a5b4fc;transition:.1s}
+    .chart-btn:hover{background:#1e1e2e;border-color:#4f46e5}
+    .chart-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;padding:16px}
+    .chart-modal-overlay.open{display:flex}
+    .chart-modal{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:16px;padding:24px;width:100%;max-width:820px;max-height:90vh;overflow:auto}
+    .chart-modal-title{font-size:1rem;font-weight:700;color:#fff;margin-bottom:4px}
+    .chart-modal-sub{font-size:.78rem;color:#6b7280;margin-bottom:16px}
+    .chart-wrap{position:relative;height:340px}
+    .chart-close{float:right;background:none;border:none;color:#6b7280;font-size:1.2rem;cursor:pointer;margin-top:-4px}
+    .chart-close:hover{color:#e2e8f0}
+    .chart-legend{display:flex;gap:16px;margin-top:10px;font-size:.76rem;flex-wrap:wrap}
+    .legend-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
   </style>
 </head>
 <body>
@@ -4572,6 +4605,7 @@ function render() {
             <th>Combined</th>
             <th>Moving Avg</th>
             <th>Ratio</th>
+            <th>Trend</th>
           </tr></thead>
           <tbody>
             ${s.alerts.map(a => `
@@ -4583,6 +4617,7 @@ function render() {
               <td class="combined">${fv(a.combined)}</td>
               <td class="avg-col">${a.avg_combined ? fv(a.avg_combined) : '—'}</td>
               <td>${a.ratio !== null ? '<span class="ratio-badge">×'+a.ratio+'</span>' : '—'}</td>
+              <td><button class="chart-btn" onclick="showChart('${s.symbol}','${a.date}','${a.timestamp}')">📈 Chart</button></td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -4611,7 +4646,115 @@ async function load() {
 }
 
 load();
+
+// ── Chart modal ────────────────────────────────────────────────────────────
+let _chartInst = null;
+
+async function showChart(symbol, date, alertTs) {
+  const overlay = document.getElementById('chartOverlay');
+  document.getElementById('chartTitle').textContent = symbol + '  ·  ' + date;
+  document.getElementById('chartSub').textContent = 'Loading…';
+  overlay.classList.add('open');
+
+  try {
+    const res = await fetch('/api/swing-orders/' + symbol + '?date=' + date);
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    const snaps = data.snapshots;
+
+    if (!snaps.length) {
+      document.getElementById('chartSub').textContent = 'No snapshot data for this date.';
+      return;
+    }
+
+    const labels  = snaps.map(s => new Date(s.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}));
+    const buyData = snaps.map(s => s.buy);
+    const selData = snaps.map(s => s.sell);
+    const comData = snaps.map(s => s.combined);
+
+    // alert marker index
+    const alertTime = alertTs ? new Date(alertTs).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : null;
+    const alertIdx  = alertTime ? labels.indexOf(alertTime) : -1;
+
+    document.getElementById('chartSub').textContent = snaps.length + ' snapshots · alert at ' + (alertTime || '—');
+
+    if (_chartInst) { _chartInst.destroy(); _chartInst = null; }
+
+    const ctx = document.getElementById('chartCanvas').getContext('2d');
+    _chartInst = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Buy',      data: buyData, borderColor:'#86efac', backgroundColor:'rgba(134,239,172,.08)', pointRadius:2, pointHoverRadius:5, tension:.3, fill:true },
+          { label: 'Sell',     data: selData, borderColor:'#fca5a5', backgroundColor:'rgba(252,165,165,.08)', pointRadius:2, pointHoverRadius:5, tension:.3, fill:true },
+          { label: 'Combined', data: comData, borderColor:'#c4b5fd', backgroundColor:'transparent',           pointRadius:2, pointHoverRadius:5, tension:.3, borderDash:[4,3] },
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        interaction:{ mode:'index', intersect:false },
+        plugins:{
+          legend:{ display:false },
+          tooltip:{
+            backgroundColor:'#1e1e2e',
+            titleColor:'#e2e8f0',
+            bodyColor:'#9ca3af',
+            borderColor:'#2a2a3e',
+            borderWidth:1,
+            callbacks:{ label: ctx => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y.toLocaleString() }
+          },
+          annotation: alertIdx >= 0 ? {
+            annotations: {
+              alertLine: {
+                type:'line', xMin:alertIdx, xMax:alertIdx,
+                borderColor:'#fb923c', borderWidth:2, borderDash:[5,4],
+                label:{ content:'Alert', enabled:true, color:'#fb923c', backgroundColor:'rgba(0,0,0,0)', font:{size:11} }
+              }
+            }
+          } : {}
+        },
+        scales:{
+          x:{ grid:{color:'#1a1a2e'}, ticks:{color:'#6b7280', maxTicksLimit:12, font:{size:11}} },
+          y:{ grid:{color:'#1a1a2e'}, ticks:{color:'#6b7280', font:{size:11},
+              callback: v => v>=1e7?(v/1e7).toFixed(1)+'Cr': v>=1e5?(v/1e5).toFixed(1)+'L': v>=1e3?(v/1e3).toFixed(0)+'K':v } }
+        }
+      }
+    });
+  } catch(e) {
+    document.getElementById('chartSub').textContent = 'Error: ' + e.message;
+  }
+}
+
+function closeChart() {
+  document.getElementById('chartOverlay').classList.remove('open');
+  if (_chartInst) { _chartInst.destroy(); _chartInst = null; }
+}
 </script>
+
+<!-- Chart.js + annotation plugin -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+
+<!-- Chart modal -->
+<div class="chart-modal-overlay" id="chartOverlay" onclick="if(event.target===this)closeChart()">
+  <div class="chart-modal">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <div>
+        <div class="chart-modal-title" id="chartTitle"></div>
+        <div class="chart-modal-sub" id="chartSub"></div>
+      </div>
+      <button class="chart-close" onclick="closeChart()">✕</button>
+    </div>
+    <div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
+    <div class="chart-legend">
+      <span><span class="legend-dot" style="background:#86efac"></span>Buy</span>
+      <span><span class="legend-dot" style="background:#fca5a5"></span>Sell</span>
+      <span><span class="legend-dot" style="background:#c4b5fd"></span>Combined</span>
+      <span style="color:#fb923c">┆ Alert time</span>
+    </div>
+  </div>
+</div>
 </body>
 </html>"""
 
