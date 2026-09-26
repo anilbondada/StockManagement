@@ -307,6 +307,19 @@ def init_db():
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN monitor_start_date TEXT")
         if "last_surge_at" not in ssl_cols:
             conn.execute("ALTER TABLE swing_shortlist ADD COLUMN last_surge_at TEXT")
+        # Surge alert history — one row per vol_surge event
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS swing_shortlist_alerts (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol        TEXT NOT NULL,
+                date          TEXT NOT NULL,
+                timestamp     TEXT NOT NULL,
+                buy_quantity  INTEGER,
+                sell_quantity INTEGER,
+                avg_combined  REAL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ssa_sym_date ON swing_shortlist_alerts(symbol, date)")
         # Order book snapshots — collected every 5 min during market hours
         conn.execute("""
             CREATE TABLE IF NOT EXISTS swing_shortlist_orders (
@@ -927,6 +940,10 @@ def _fetch_swing_orders() -> list:
                 event_type = "vol_surge" if avg_combined > 0 and new_combined >= 2 * avg_combined else "max_pending"
                 if event_type == "vol_surge":
                     conn.execute("UPDATE swing_shortlist SET last_surge_at=? WHERE symbol=?", (ts, sym))
+                    conn.execute(
+                        "INSERT INTO swing_shortlist_alerts (symbol, date, timestamp, buy_quantity, sell_quantity, avg_combined) VALUES (?,?,?,?,?,?)",
+                        (sym, today, ts, new_buy, new_sell, avg_combined)
+                    )
                 max_events.append({"type": event_type, "symbol": sym, "buy": new_buy, "sell": new_sell, "at": ts})
     print(f"[swing-orders] Snapshot saved for {len(symbols)} symbols at {ts}")
     return max_events
@@ -1386,6 +1403,16 @@ body{font-family:'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh;paddi
       </div>
       <div class="card-name">Swing Monitor</div>
       <div class="card-desc">Live volume tracking for all monitored stocks</div>
+    </a>
+
+    <a class="card" href="/swing-alerts">
+      <div class="icon icon-orange">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+      </div>
+      <div class="card-name">Swing Alerts</div>
+      <div class="card-desc">History of all 2× volume surge alerts per stock</div>
     </a>
 
     <a class="card" href="/chartink-alerts">
@@ -4351,6 +4378,244 @@ def api_swing_shortlist(date: Optional[str] = None):
     }
 
 
+@app.get("/api/swing-alerts")
+def api_swing_alerts():
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT
+                a.symbol, a.date, a.timestamp, a.buy_quantity, a.sell_quantity, a.avg_combined,
+                sl.stage
+            FROM swing_shortlist_alerts a
+            LEFT JOIN swing_shortlist sl ON sl.symbol = a.symbol
+            ORDER BY a.timestamp DESC
+        """).fetchall()
+    grouped = {}
+    for r in rows:
+        sym = r[0]
+        if sym not in grouped:
+            grouped[sym] = {"symbol": sym, "stage": r[6], "alerts": []}
+        grouped[sym]["alerts"].append({
+            "date":         r[1],
+            "timestamp":    r[2],
+            "buy":          r[3],
+            "sell":         r[4],
+            "combined":     (r[3] or 0) + (r[4] or 0),
+            "avg_combined": r[5],
+            "ratio":        round(((r[3] or 0) + (r[4] or 0)) / r[5], 2) if r[5] else None,
+        })
+    stocks = sorted(grouped.values(), key=lambda s: s["alerts"][0]["timestamp"], reverse=True)
+    return {"stocks": stocks}
+
+
+@app.get("/swing-alerts", response_class=HTMLResponse)
+def swing_alerts_ui():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Swing Alerts</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',sans-serif;background:#0a0a14;color:#e2e8f0;padding:20px 16px;min-height:100vh}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+    h1{font-size:1.25rem;font-weight:700;color:#fff}
+    .meta{font-size:.8rem;color:#6b7280;margin-top:3px}
+    .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{padding:7px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer;background:#1e1e2e;color:#9ca3af;text-decoration:none;display:inline-flex;align-items:center;gap:5px}
+    .btn:hover{background:#2a2a3e;color:#e2e8f0}
+    .btn-primary{background:#4f46e5;color:#fff}
+    .btn-primary:hover{background:#4338ca}
+    .stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}
+    .stat{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:10px;padding:12px 18px;min-width:110px}
+    .stat-label{font-size:.7rem;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+    .stat-value{font-size:1.4rem;font-weight:700;color:#fff}
+    .stock-card{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:12px;margin-bottom:10px;overflow:hidden}
+    .stock-header{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;user-select:none;transition:.1s}
+    .stock-header:hover{background:#252535}
+    .sym{font-weight:700;color:#e2e8f0;font-size:.95rem}
+    .stg-badge{padding:2px 8px;border-radius:999px;font-size:.7rem;font-weight:700;display:inline-block;white-space:nowrap}
+    .stg-green{background:#14532d;color:#86efac}
+    .stg-red{background:#450a0a;color:#fca5a5}
+    .stg-orange{background:#431407;color:#fb923c}
+    .stg-yellow{background:#44350a;color:#fde68a}
+    .stg-blue{background:#1e3a5f;color:#93c5fd}
+    .stg-gray{background:#1f2937;color:#6b7280}
+    .alert-count{background:#7c2d12;color:#fb923c;border:1px solid #9a3412;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700}
+    .last-at{font-size:.78rem;color:#6b7280;margin-left:auto}
+    .expand-icon{color:#4b5563;font-size:.85rem;margin-left:8px;transition:transform .2s}
+    .expand-icon.open{transform:rotate(90deg)}
+    .alert-table-wrap{display:none;border-top:1px solid #2a2a3e}
+    .alert-table-wrap.open{display:block}
+    table{width:100%;border-collapse:collapse;font-size:.83rem}
+    thead th{padding:9px 16px;text-align:left;color:#6b7280;font-weight:600;font-size:.71rem;text-transform:uppercase;letter-spacing:.05em;background:#13131f;white-space:nowrap}
+    tbody tr{border-top:1px solid #111120;transition:background .1s}
+    tbody tr:hover{background:#151520}
+    td{padding:9px 16px;vertical-align:middle;white-space:nowrap}
+    .buy{color:#86efac;font-weight:600}
+    .sell{color:#fca5a5;font-weight:600}
+    .combined{color:#c4b5fd;font-weight:700}
+    .ratio-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:700;background:#431407;color:#fb923c}
+    .ts{color:#9ca3af;font-size:.8rem}
+    .date-col{color:#6b7280;font-size:.75rem}
+    .empty{text-align:center;padding:60px;color:#4b5563}
+    .avg-col{color:#6b7280;font-size:.8rem}
+    .filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+    input[type=date]{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:8px;color:#e2e8f0;padding:6px 10px;font-size:.83rem}
+    input[type=text]{background:#1e1e2e;border:1px solid #2a2a3e;border-radius:8px;color:#e2e8f0;padding:6px 10px;font-size:.83rem;width:160px}
+    input[type=text]::placeholder{color:#4b5563}
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Swing Stock Alerts</h1>
+    <div class="meta" id="meta">Loading…</div>
+  </div>
+  <div class="controls">
+    <button class="btn btn-primary" onclick="load()">Refresh</button>
+    <a href="/swing-monitor" class="btn">Monitor</a>
+    <a href="/swing-shortlist" class="btn">Shortlist</a>
+    <a href="/" class="btn">← Home</a>
+  </div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="filter-row">
+  <input type="text" id="searchInput" placeholder="Filter symbol…" oninput="render()"/>
+  <input type="date" id="dateFilter" onchange="render()" title="Filter by alert date"/>
+  <button class="btn" onclick="document.getElementById('dateFilter').value='';document.getElementById('searchInput').value='';render()">Clear</button>
+</div>
+
+<div id="cards"></div>
+
+<script>
+let _data = [];
+
+function fv(n) {
+  if (n === null || n === undefined) return '—';
+  if (n >= 1e7) return (n/1e7).toFixed(2)+'Cr';
+  if (n >= 1e5) return (n/1e5).toFixed(2)+'L';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return Math.round(n).toLocaleString();
+}
+function fdt(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})
+      + ' ' + d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
+  } catch{ return iso; }
+}
+function stageClass(s) {
+  if (!s) return 'stg-gray';
+  if (/Stage 2|Advancing/i.test(s)) return 'stg-green';
+  if (/Stage 4|Declining/i.test(s)) return 'stg-red';
+  if (/Stage 3|Topping|Distribution/i.test(s)) return 'stg-orange';
+  if (/Transition/i.test(s)) return 'stg-yellow';
+  if (/Stage 1|Basing|Accumulation/i.test(s)) return 'stg-blue';
+  return 'stg-gray';
+}
+function shortStage(s) {
+  if (!s) return '—';
+  if (/Insufficient/i.test(s)) return 'N/A';
+  return s.replace(/Stage (\\d).*?\\(([^)]+)\\).*/, 'S$1 $2').replace(/Stage.*?Transition.*?\\(([^)]+)\\).*/, 'Transition');
+}
+
+function toggle(sym) {
+  const wrap = document.getElementById('alerts-' + sym);
+  const icon = document.getElementById('icon-' + sym);
+  if (!wrap) return;
+  wrap.classList.toggle('open');
+  icon.classList.toggle('open');
+}
+
+function render() {
+  const search   = document.getElementById('searchInput').value.trim().toUpperCase();
+  const dateF    = document.getElementById('dateFilter').value;
+  const container = document.getElementById('cards');
+
+  let filtered = _data;
+  if (search) filtered = filtered.filter(s => s.symbol.includes(search));
+  if (dateF)  filtered = filtered.map(s => ({
+    ...s,
+    alerts: s.alerts.filter(a => a.date === dateF)
+  })).filter(s => s.alerts.length > 0);
+
+  if (!filtered.length) {
+    container.innerHTML = '<div class="empty">No alerts found</div>';
+    return;
+  }
+
+  let html = '';
+  filtered.forEach(s => {
+    const lastAt = s.alerts[0] ? fdt(s.alerts[0].timestamp) : '—';
+    const safeSym = s.symbol.replace(/[^A-Z0-9]/g, '');
+    html += `
+    <div class="stock-card">
+      <div class="stock-header" onclick="toggle('${safeSym}')">
+        <span class="sym">${s.symbol}</span>
+        ${s.stage ? '<span class="stg-badge '+stageClass(s.stage)+'">'+shortStage(s.stage)+'</span>' : ''}
+        <span class="alert-count">⚡ ${s.alerts.length} alert${s.alerts.length>1?'s':''}</span>
+        <span class="last-at">Last: ${lastAt}</span>
+        <span class="expand-icon" id="icon-${safeSym}">▶</span>
+      </div>
+      <div class="alert-table-wrap" id="alerts-${safeSym}">
+        <table>
+          <thead><tr>
+            <th>Date</th>
+            <th>Time</th>
+            <th>▲ Buy</th>
+            <th>▼ Sell</th>
+            <th>Combined</th>
+            <th>Moving Avg</th>
+            <th>Ratio</th>
+          </tr></thead>
+          <tbody>
+            ${s.alerts.map(a => `
+            <tr>
+              <td class="date-col">${a.date||'—'}</td>
+              <td class="ts">${a.timestamp ? new Date(a.timestamp).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '—'}</td>
+              <td class="buy">▲ ${fv(a.buy)}</td>
+              <td class="sell">▼ ${fv(a.sell)}</td>
+              <td class="combined">${fv(a.combined)}</td>
+              <td class="avg-col">${a.avg_combined ? fv(a.avg_combined) : '—'}</td>
+              <td>${a.ratio !== null ? '<span class="ratio-badge">×'+a.ratio+'</span>' : '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+  container.innerHTML = html;
+}
+
+async function load() {
+  document.getElementById('cards').innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const res = await fetch('/api/swing-alerts');
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    _data = data.stocks;
+    const totalAlerts = _data.reduce((s, x) => s + x.alerts.length, 0);
+    document.getElementById('stats').innerHTML = `
+      <div class="stat"><div class="stat-label">Stocks Alerted</div><div class="stat-value">${_data.length}</div></div>
+      <div class="stat"><div class="stat-label">Total Surges</div><div class="stat-value" style="color:#fb923c">${totalAlerts}</div></div>`;
+    document.getElementById('meta').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+    render();
+  } catch(e) {
+    document.getElementById('cards').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
 @app.get("/api/swing-monitor")
 def api_swing_monitor():
     ist_tz = timezone(timedelta(hours=5, minutes=30))
@@ -4473,6 +4738,7 @@ def swing_monitor_ui():
   </div>
   <div class="controls">
     <button class="btn btn-primary" onclick="load()">Refresh</button>
+    <a href="/swing-alerts" class="btn">Alerts</a>
     <a href="/swing-shortlist" class="btn">Shortlist</a>
     <a href="/" class="btn">← Home</a>
   </div>
